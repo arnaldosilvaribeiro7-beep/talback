@@ -67,7 +67,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.credentials.CredentialManager
 import com.example.data.model.AudioOutputRoute
 import com.example.data.model.AudioProcessingSettings
 import com.example.data.model.PresenceStatus
@@ -100,7 +99,6 @@ fun ProfileScreen(
     val colors = LocalTalkbackColors.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val credentialManager = remember(context) { CredentialManager.create(context) }
 
     var displayName by remember(myProfile?.userId) { mutableStateOf(myProfile?.displayName ?: "") }
     var username by remember(myProfile?.userId) { mutableStateOf(myProfile?.username ?: "") }
@@ -596,7 +594,7 @@ fun ProfileScreen(
                     )
                     Button(
                         onClick = {
-                            authRepository.signOut(credentialManager, scope)
+                            authRepository.signOut(scope)
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = colors.dnd),
                         modifier = Modifier

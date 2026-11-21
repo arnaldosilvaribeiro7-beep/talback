@@ -1,5 +1,6 @@
 package com.example
 
+import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
 import android.util.Log
@@ -30,6 +31,8 @@ import com.example.data.preferences.LocalFriendsCache
 import com.example.data.remote.AuthRepository
 import com.example.data.remote.CallRepository
 import com.example.data.remote.ChatRepository
+import com.example.data.remote.GoogleOAuthCoordinator
+import com.example.data.remote.OAuthUiState
 import com.example.data.remote.ProfileRepository
 import com.example.data.remote.ServerClock
 import com.example.data.remote.ServerRepository
@@ -49,6 +52,12 @@ import com.google.firebase.storage.FirebaseStorage
 import kotlinx.coroutines.tasks.await
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        const val ACTION_OAUTH_REDIRECT = "com.example.ACTION_OAUTH_REDIRECT"
+    }
+
+    private var oauthCoordinator: GoogleOAuthCoordinator? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -95,6 +104,14 @@ class MainActivity : ComponentActivity() {
         val localFriendsCache = LocalFriendsCache(applicationContext)
 
         val authRepo = AuthRepository(db = db, auth = auth)
+        val coordinator = GoogleOAuthCoordinator(applicationContext, authRepo).also {
+            it.registerAuthTabLauncher(this)
+        }
+        oauthCoordinator = coordinator
+        if (intent?.action == ACTION_OAUTH_REDIRECT) {
+            coordinator.handleRedirectUri(intent?.data)
+        }
+
         val profileRepo = ProfileRepository(db = db, storage = storage, auth = auth)
         val socialRepo = SocialRepository(
             db = db,
@@ -144,12 +161,17 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            val oauthUiState by coordinator.uiState.collectAsStateWithLifecycle(initialValue = OAuthUiState.Idle)
+
             TalkbackTheme(themeMode = themeMode) {
                 val uid = currentUser?.uid
                 if (uid == null) {
                     AuthScreen(
-                        authRepository = authRepo,
-                        onAuthSuccess = {}
+                        oauthUiState = oauthUiState,
+                        onGoogleSignInClick = {
+                            coordinator.clearError()
+                            coordinator.startGoogleOAuth(this@MainActivity)
+                        }
                     )
                 } else {
                     key(uid) {
@@ -170,6 +192,19 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == ACTION_OAUTH_REDIRECT) {
+            oauthCoordinator?.handleRedirectUri(intent.data)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        oauthCoordinator?.onHostActivityResumed()
     }
 
     private fun ensureFirebaseInitialized(): Boolean {

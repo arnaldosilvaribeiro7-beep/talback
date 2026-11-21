@@ -13,14 +13,13 @@ import com.example.data.model.ThemeMode
 import com.example.data.model.UserProfile
 import com.example.data.preferences.AppPreferencesRepository
 import com.example.data.preferences.LocalFriendsCache
-import com.example.data.remote.AuthRepository
+import com.example.data.remote.OAuthSessionStore
+import com.example.data.remote.OAuthUiState
+import com.example.data.remote.PendingOAuthSession
 import com.example.ui.components.MessageListAndComposer
 import com.example.ui.components.ProfileHeaderCard
 import com.example.ui.screens.AuthScreen
 import com.example.ui.theme.TalkbackTheme
-import com.google.firebase.FirebaseApp
-import com.google.firebase.FirebaseOptions
-import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -47,6 +46,10 @@ class ExampleRobolectricTest {
         assertTrue(dbId.isNotBlank())
         val webClientId = context.getString(R.string.default_web_client_id)
         assertTrue(webClientId.endsWith(".apps.googleusercontent.com"))
+        val androidClientId = context.getString(R.string.google_android_oauth_client_id)
+        assertTrue(androidClientId.endsWith(".apps.googleusercontent.com"))
+        val redirectScheme = context.getString(R.string.google_oauth_redirect_scheme)
+        assertTrue(redirectScheme.startsWith("com.googleusercontent.apps."))
     }
 
     @Test
@@ -167,29 +170,33 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `auth screen displays google sign-in and gmail 6-digit otp options`() {
+    fun `auth screen displays google sign-in button and oauth session store consumes once`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        if (FirebaseApp.getApps(context).isEmpty()) {
-            FirebaseApp.initializeApp(
-                context,
-                FirebaseOptions.Builder()
-                    .setApplicationId(context.getString(R.string.google_app_id))
-                    .setApiKey(context.getString(R.string.google_api_key))
-                    .setProjectId(context.getString(R.string.project_id))
-                    .build()
+        val store = OAuthSessionStore(context)
+        store.save(
+            PendingOAuthSession(
+                state = "st_abc",
+                nonce = "nc_xyz",
+                codeVerifier = "verifier_123",
+                clientId = "client_id",
+                redirectUri = "com.googleusercontent.apps.client:/oauth2redirect",
+                redirectScheme = "com.googleusercontent.apps.client",
+                usedCustomTabsFallback = false,
+                createdAtMillis = System.currentTimeMillis()
             )
-        }
-        val db = FirebaseFirestore.getInstance(context.getString(R.string.firestore_database_id))
-        val repo = AuthRepository(db = db)
+        )
+        assertEquals("st_abc", store.consume()?.state)
+        assertEquals(null, store.consume())
 
         composeTestRule.setContent {
             TalkbackTheme(themeMode = ThemeMode.DARK) {
-                AuthScreen(authRepository = repo, onAuthSuccess = {})
+                AuthScreen(
+                    oauthUiState = OAuthUiState.Idle,
+                    onGoogleSignInClick = {}
+                )
             }
         }
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("google_sign_in_button").performScrollTo().assertIsDisplayed()
-        composeTestRule.onNodeWithTag("gmail_email_input").performScrollTo().assertIsDisplayed()
-        composeTestRule.onNodeWithTag("send_otp_button").performScrollTo().assertIsDisplayed()
     }
 }

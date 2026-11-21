@@ -1,22 +1,9 @@
 package com.example.data.remote
 
-import android.app.Activity
-import android.content.Context
 import android.util.Log
-import androidx.credentials.ClearCredentialStateRequest
-import androidx.credentials.CredentialManager
-import androidx.credentials.CustomCredential
-import androidx.credentials.GetCredentialRequest
-import androidx.credentials.exceptions.GetCredentialCancellationException
-import androidx.credentials.exceptions.NoCredentialException
-import com.example.BuildConfig
-import com.example.R
-import com.google.android.libraries.identity.googleid.GetGoogleIdOption
-import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
-import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
-import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential.Companion.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseAuthInvalidCredentialsException
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.auth
@@ -32,71 +19,27 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-object GmailAuthValidator {
-    private val GMAIL_REGEX = Regex("^[a-z0-9._%+-]+@gmail\\.com$")
-    private val USERNAME_REGEX = Regex("^[a-z0-9_.]{3,30}$")
-    private val CODE_REGEX = Regex("^\\d{6}$")
-
-    fun normalizeGmail(rawEmail: String): String? {
-        val cleaned = rawEmail.trim().lowercase()
-        if (cleaned.isBlank() || cleaned.length > 160) return null
-        return cleaned.takeIf { GMAIL_REGEX.matches(it) }
-    }
-
-    fun isValidGmail(rawEmail: String): Boolean = normalizeGmail(rawEmail) != null
-
-    fun normalizeUsername(rawUsername: String): String? {
-        val cleaned = rawUsername.trim().lowercase().removePrefix("@")
-        return cleaned.takeIf { USERNAME_REGEX.matches(it) }
-    }
-
-    fun isValidSixDigitCode(rawCode: String): Boolean = CODE_REGEX.matches(rawCode.trim())
-}
-
 @Serializable
-data class GmailOtpChallenge(
-    val challengeId: String,
-    val email: String,
-    val expiresInSeconds: Int = 600,
-    val resendAfterSeconds: Int = 60
+private data class GoogleTokenResponse(
+    @SerialName("access_token") val accessToken: String = "",
+    @SerialName("id_token") val idToken: String = "",
+    @SerialName("token_type") val tokenType: String = "",
+    @SerialName("expires_in") val expiresIn: Long = 0L
 )
 
 @Serializable
-private data class RequestOtpBody(
-    val email: String,
-    val username: String? = null,
-    val displayName: String? = null,
-    val isNewAccount: Boolean
-)
-
-@Serializable
-private data class VerifyOtpBody(
-    val challengeId: String,
-    val email: String,
-    val code: String,
-    val username: String? = null,
-    val displayName: String? = null
-)
-
-@Serializable
-private data class VerifyOtpResponse(
-    val customToken: String,
-    val uid: String = "",
-    val email: String = ""
-)
-
-@Serializable
-private data class OtpErrorResponse(
-    val error: String? = null
+private data class GoogleTokenErrorResponse(
+    val error: String? = null,
+    @SerialName("error_description") val errorDescription: String? = null
 )
 
 fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
@@ -113,219 +56,120 @@ class AuthRepository(
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(25, TimeUnit.SECONDS)
-        .build(),
-    private val functionsBaseUrl: String = BuildConfig.AUTH_FUNCTIONS_BASE_URL.trimEnd('/')
+        .build()
 ) {
-    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
-    private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+    private val json = Json { ignoreUnknownKeys = true }
 
-    fun attemptAutoSignIn(
-        context: Context,
-        credentialManager: CredentialManager,
-        scope: CoroutineScope,
-        onAuthSuccess: () -> Unit,
-        onUnauthenticated: () -> Unit
-    ) {
-        if (auth.currentUser != null) {
-            scope.launch {
-                ensureUserInitialized(auth.currentUser!!)
-                onAuthSuccess()
-            }
-            return
-        }
-        val clientId = try {
-            context.getString(R.string.default_web_client_id).trim()
-        } catch (_: Exception) {
-            onUnauthenticated()
-            return
-        }
-        if (clientId.isBlank()) {
-            onUnauthenticated()
-            return
-        }
-        scope.launch {
-            try {
-                val googleIdOption = GetGoogleIdOption.Builder()
-                    .setFilterByAuthorizedAccounts(true)
-                    .setServerClientId(clientId)
-                    .setAutoSelectEnabled(true)
-                    .build()
-                val request = GetCredentialRequest.Builder()
-                    .addCredentialOption(googleIdOption)
-                    .build()
-                val cred = credentialManager.getCredential(context, request).credential
-                if (cred is CustomCredential && cred.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                    val token = GoogleIdTokenCredential.createFrom(cred.data).idToken
-                    val result = auth.signInWithCredential(GoogleAuthProvider.getCredential(token, null)).await()
-                    result.user?.let { ensureUserInitialized(it) }
-                    onAuthSuccess()
-                } else {
-                    onUnauthenticated()
-                }
-            } catch (_: NoCredentialException) {
-                onUnauthenticated()
-            } catch (_: Exception) {
-                onUnauthenticated()
-            }
-        }
-    }
-
-    fun onGoogleSignInClicked(
-        context: Context,
-        credentialManager: CredentialManager,
-        scope: CoroutineScope,
-        onAuthSuccess: () -> Unit,
-        onAuthError: (String) -> Unit,
-        onAuthCancelled: () -> Unit = {}
-    ) {
-        val clientId = try {
-            context.getString(R.string.default_web_client_id).trim()
-        } catch (_: Exception) {
-            onAuthError("Configuração Google Sign-In ausente (default_web_client_id).")
-            return
-        }
-        if (clientId.isBlank()) {
-            onAuthError("Configuração Google Sign-In vazia (default_web_client_id).")
-            return
-        }
-        scope.launch {
-            try {
-                val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
-                val request = GetCredentialRequest.Builder()
-                    .addCredentialOption(signInOption)
-                    .build()
-                val activity = context as? Activity
-                    ?: throw IllegalStateException("Contexto de Activity necessário para autenticação.")
-                val cred = credentialManager.getCredential(activity, request).credential
-                if (cred is CustomCredential && cred.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                    val token = GoogleIdTokenCredential.createFrom(cred.data).idToken
-                    val result = auth.signInWithCredential(GoogleAuthProvider.getCredential(token, null)).await()
-                    result.user?.let { ensureUserInitialized(it) }
-                    onAuthSuccess()
-                } else {
-                    onAuthError("Tipo de credencial inesperado.")
-                }
-            } catch (e: GetCredentialCancellationException) {
-                Log.w("Auth", "Google Sign-In cancelled or dismissed: ${e.message}", e)
-                onAuthCancelled()
-            } catch (e: NoCredentialException) {
-                Log.w("Auth", "No Google credentials available on device: ${e.message}", e)
-                onAuthError("Nenhuma conta Google encontrada neste dispositivo. Adicione uma conta Google ou use @gmail.com com código de 6 dígitos.")
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e("Auth", "Google Sign-In failed", e)
-                onAuthError(e.localizedMessage ?: "Falha na autenticação com Google.")
-            }
-        }
-    }
-
-    suspend fun requestGmailVerificationCode(
-        rawEmail: String,
-        rawUsername: String? = null,
-        rawDisplayName: String? = null,
-        isNewAccount: Boolean
-    ): Result<GmailOtpChallenge> {
-        val normalizedEmail = GmailAuthValidator.normalizeGmail(rawEmail)
-            ?: return Result.failure(
-                IllegalArgumentException("Use exclusivamente um endereço @gmail.com válido.")
-            )
-        var normalizedUsername: String? = null
-        var cleanedDisplayName: String? = null
-        if (isNewAccount) {
-            normalizedUsername = GmailAuthValidator.normalizeUsername(rawUsername.orEmpty())
-                ?: return Result.failure(
-                    IllegalArgumentException("Escolha um @usuário válido (3 a 30 caracteres: a-z, 0-9, _ ou .).")
-                )
-            cleanedDisplayName = rawDisplayName?.trim()?.take(50)?.takeIf { it.isNotBlank() }
-                ?: normalizedUsername
-        }
-
-        return try {
-            val payload = json.encodeToString(
-                RequestOtpBody(
-                    email = normalizedEmail,
-                    username = normalizedUsername,
-                    displayName = cleanedDisplayName,
-                    isNewAccount = isNewAccount
-                )
-            )
-            val responseBody = postJson("$functionsBaseUrl/requestEmailCode", payload)
-            val challenge = json.decodeFromString<GmailOtpChallenge>(responseBody)
-            Result.success(challenge)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
-    suspend fun verifyGmailCodeAndSignIn(
-        challengeId: String,
-        rawEmail: String,
-        rawCode: String,
-        rawUsername: String? = null,
-        rawDisplayName: String? = null
+    suspend fun completeGoogleOAuthCodeExchange(
+        authorizationCode: String,
+        pendingSession: PendingOAuthSession
     ): Result<Unit> {
-        val normalizedEmail = GmailAuthValidator.normalizeGmail(rawEmail)
-            ?: return Result.failure(IllegalArgumentException("Use um endereço @gmail.com válido."))
-        val cleanCode = rawCode.trim()
-        if (!GmailAuthValidator.isValidSixDigitCode(cleanCode)) {
-            return Result.failure(IllegalArgumentException("Digite o código numérico de 6 dígitos."))
-        }
-        val cleanUsername = rawUsername?.let { GmailAuthValidator.normalizeUsername(it) }
-        val cleanDisplayName = rawDisplayName?.trim()?.take(50)?.takeIf { it.isNotBlank() }
-
         return try {
-            val payload = json.encodeToString(
-                VerifyOtpBody(
-                    challengeId = challengeId,
-                    email = normalizedEmail,
-                    code = cleanCode,
-                    username = cleanUsername,
-                    displayName = cleanDisplayName
-                )
+            val tokenResponse = exchangeAuthorizationCodeForTokens(
+                code = authorizationCode,
+                clientId = pendingSession.clientId,
+                codeVerifier = pendingSession.codeVerifier,
+                redirectUri = pendingSession.redirectUri
             )
-            val responseBody = postJson("$functionsBaseUrl/verifyEmailCode", payload)
-            val verified = json.decodeFromString<VerifyOtpResponse>(responseBody)
-            val authResult = auth.signInWithCustomToken(verified.customToken).await()
+
+            if (tokenResponse.idToken.isBlank() || tokenResponse.accessToken.isBlank()) {
+                return Result.failure(
+                    IllegalStateException("Resposta OAuth incompleta do Google (tokens ausentes).")
+                )
+            }
+
+            val claims = GoogleOAuthProtocol.validateGoogleIdTokenPayload(
+                idToken = tokenResponse.idToken,
+                expectedClientId = pendingSession.clientId,
+                expectedNonce = pendingSession.nonce
+            ).getOrElse { err ->
+                return Result.failure(err)
+            }
+
+            val authResult = try {
+                val credential = GoogleAuthProvider.getCredential(
+                    tokenResponse.idToken,
+                    tokenResponse.accessToken
+                )
+                auth.signInWithCredential(credential).await()
+            } catch (e: FirebaseAuthInvalidCredentialsException) {
+                // If Firebase Auth Google provider only safelists the Web Client ID for id_token audience,
+                // authenticate via verified OAuth access_token after our strict local OIDC ID token checks.
+                Log.w(
+                    "Auth",
+                    "Firebase rejected id_token aud (${e.errorCode}); retrying with verified OAuth accessToken",
+                    e
+                )
+                val accessCredential = GoogleAuthProvider.getCredential(
+                    null,
+                    tokenResponse.accessToken
+                )
+                auth.signInWithCredential(accessCredential).await()
+            }
+
             val user = authResult.user
-                ?: return Result.failure(IllegalStateException("Não foi possível concluir a sessão no Firebase Auth."))
-            ensureUserInitialized(user, preferredUsername = cleanUsername, preferredDisplayName = cleanDisplayName)
+                ?: return Result.failure(
+                    IllegalStateException("Sessão Firebase não foi criada após o login.")
+                )
+
+            ensureUserInitialized(
+                user = user,
+                preferredDisplayName = claims.name,
+                preferredAvatarUrl = claims.picture
+            )
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
+        } catch (e: IOException) {
+            Log.e("Auth", "Network failure during OAuth token exchange", e)
+            Result.failure(
+                IllegalStateException("Falha de conexão ao validar autenticação com o Google.")
+            )
         } catch (e: Exception) {
+            Log.e("Auth", "OAuth sign-in failed", e)
             Result.failure(e)
         }
     }
 
-    private suspend fun postJson(url: String, jsonBody: String): String = withContext(Dispatchers.IO) {
-        val req = Request.Builder()
-            .url(url)
-            .post(jsonBody.toRequestBody(jsonMediaType))
+    private suspend fun exchangeAuthorizationCodeForTokens(
+        code: String,
+        clientId: String,
+        codeVerifier: String,
+        redirectUri: String
+    ): GoogleTokenResponse = withContext(Dispatchers.IO) {
+        val formBody = FormBody.Builder()
+            .add("grant_type", "authorization_code")
+            .add("code", code)
+            .add("client_id", clientId)
+            .add("code_verifier", codeVerifier)
+            .add("redirect_uri", redirectUri)
             .build()
-        httpClient.newCall(req).execute().use { resp ->
-            val rawBody = resp.body?.string().orEmpty()
-            if (resp.isSuccessful) {
-                return@withContext rawBody
+
+        val request = Request.Builder()
+            .url(GoogleOAuthProtocol.TOKEN_ENDPOINT)
+            .post(formBody)
+            .build()
+
+        httpClient.newCall(request).execute().use { response ->
+            val rawBody = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                val errPayload = runCatching {
+                    json.decodeFromString<GoogleTokenErrorResponse>(rawBody)
+                }.getOrNull()
+                val msg = errPayload?.errorDescription?.takeIf { it.isNotBlank() }
+                    ?: errPayload?.error?.let { "Erro OAuth ($it) ao trocar código por token." }
+                    ?: "Erro HTTP ${response.code} ao trocar código OAuth."
+                throw IllegalStateException(msg)
             }
-            val parsedMessage = runCatching {
-                json.decodeFromString<OtpErrorResponse>(rawBody).error
-            }.getOrNull()
-            val message = when {
-                !parsedMessage.isNullOrBlank() -> parsedMessage
-                resp.code == 404 -> "Serviço de código por e-mail ainda não implantado no Firebase Functions (deploy functions)."
-                else -> "Erro ao comunicar com servidor de verificação (${resp.code})."
-            }
-            throw IllegalStateException(message)
+            json.decodeFromString<GoogleTokenResponse>(rawBody)
         }
     }
 
     suspend fun ensureUserInitialized(
         user: FirebaseUser,
         preferredUsername: String? = null,
-        preferredDisplayName: String? = null
+        preferredDisplayName: String? = null,
+        preferredAvatarUrl: String? = null
     ): Result<Unit> {
         val uid = user.uid
         val userDocRef = db.collection("users").document(uid)
@@ -342,7 +186,8 @@ class AuthRepository(
                     .take(18)
                 val username = preferredUsername?.takeIf { it.matches(Regex("^[a-z0-9_.]{3,30}$")) }
                     ?: "${baseHandle}_${uid.take(6).lowercase()}"
-                val avatarUrl = user.photoUrl?.toString()?.take(500)
+                val avatarUrl = (preferredAvatarUrl?.takeIf { it.isNotBlank() }
+                    ?: user.photoUrl?.toString())?.take(500)
 
                 val profileMap = mutableMapOf<String, Any>(
                     "userId" to uid,
@@ -411,7 +256,6 @@ class AuthRepository(
     }
 
     fun signOut(
-        credentialManager: CredentialManager,
         scope: CoroutineScope,
         onSignOutComplete: () -> Unit = {}
     ) {
@@ -429,9 +273,6 @@ class AuthRepository(
                             ).await()
                         }
                     }
-                    credentialManager.clearCredentialState(ClearCredentialStateRequest())
-                } catch (e: Exception) {
-                    Log.w("Auth", "Failed to clear credential state: ${e.message}")
                 } finally {
                     auth.signOut()
                     onSignOutComplete()
