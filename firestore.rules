@@ -1,0 +1,692 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: deny everything by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- GLOBAL HELPERS ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidUsername(u) {
+      return u is string && u.size() >= 3 && u.size() <= 30 && u.matches('^[a-z0-9_\\.]+$');
+    }
+
+    function isValidTimestamp(ts) {
+      return ts is timestamp && ts <= request.time;
+    }
+
+    function isOptionalString(data, key, maxLen) {
+      return !(key in data) || (data[key] is string && data[key].size() <= maxLen);
+    }
+
+    function isBoundedStringList(lst, maxSize) {
+      return lst is list && lst.size() <= maxSize && (lst.size() == 0 || lst[0] is string);
+    }
+
+    // Server RBAC helpers (used on single-doc create/update/delete, NEVER inside allow list)
+    function serverDoc(serverId) {
+      return get(/databases/$(database)/documents/servers/$(serverId)).data;
+    }
+
+    function isServerOwner(serverId) {
+      return exists(/databases/$(database)/documents/servers/$(serverId)) &&
+             serverDoc(serverId).ownerUid == request.auth.uid;
+    }
+
+    function isServerMember(serverId) {
+      return exists(/databases/$(database)/documents/servers/$(serverId)) &&
+             request.auth.uid in serverDoc(serverId).memberUids;
+    }
+
+    function isBannedFromServer(serverId, uid) {
+      return exists(/databases/$(database)/documents/servers/$(serverId)/bans/$(uid));
+    }
+
+    function hasServerPermission(serverId, perm) {
+      return isServerOwner(serverId) || (
+        exists(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid)) && (
+          'ADMIN_SERVER' in get(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid)).data.permissions ||
+          perm in get(/databases/$(database)/documents/servers/$(serverId)/members/$(request.auth.uid)).data.permissions
+        )
+      );
+    }
+
+    // --- ENTITY VALIDATION HELPERS ---
+
+    function isValidUsernameClaim(data, usernameKey) {
+      return data.userId is string && data.userId.size() <= 128 &&
+             data.username is string && data.username == usernameKey && isValidUsername(data.username) &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 50 &&
+             isOptionalString(data, 'avatarUrl', 500) &&
+             isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             isValidUsername(data.username) &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 50 &&
+             data.bio is string && data.bio.size() <= 300 &&
+             data.statusText is string && data.statusText.size() <= 80 &&
+             data.presence in ['online', 'idle', 'dnd', 'offline'] &&
+             isOptionalString(data, 'avatarUrl', 500) &&
+             isOptionalString(data, 'bannerUrl', 500) &&
+             isOptionalString(data, 'bannerVideoUrl', 500) &&
+             data.primaryColorHex is int &&
+             data.secondaryColorHex is int &&
+             data.gradientEnabled is bool &&
+             isOptionalString(data, 'fcmToken', 512) &&
+             isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidPrivateAccount(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             isOptionalString(data, 'email', 160) &&
+             isBoundedStringList(data.blockedUids, 200) &&
+             data.notifyMessages is bool &&
+             data.notifyFriendRequests is bool &&
+             data.notifyInvites is bool &&
+             data.notifyCalls is bool &&
+             data.notifyMentions is bool &&
+             isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidFriendRequest(data) {
+      return data.fromUid is string && data.fromUid.size() >= 1 && data.fromUid.size() <= 128 &&
+             isValidUsername(data.fromUsername) &&
+             data.fromDisplayName is string && data.fromDisplayName.size() >= 1 && data.fromDisplayName.size() <= 50 &&
+             isOptionalString(data, 'fromAvatarUrl', 500) &&
+             data.toUid is string && data.toUid.size() >= 1 && data.toUid.size() <= 128 &&
+             data.fromUid != data.toUid &&
+             isValidUsername(data.toUsername) &&
+             data.toDisplayName is string && data.toDisplayName.size() >= 1 && data.toDisplayName.size() <= 50 &&
+             isOptionalString(data, 'toAvatarUrl', 500) &&
+             data.status in ['pending', 'accepted', 'declined'] &&
+             isBoundedStringList(data.participantUids, 2) && data.participantUids.size() == 2 &&
+             data.fromUid in data.participantUids && data.toUid in data.participantUids &&
+             isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidFriendship(data) {
+      return isBoundedStringList(data.participantUids, 2) && data.participantUids.size() == 2 &&
+             data.userAUid is string && data.userAUid in data.participantUids &&
+             data.userAName is string && data.userAName.size() >= 1 && data.userAName.size() <= 50 &&
+             isValidUsername(data.userAUsername) &&
+             isOptionalString(data, 'userAAvatarUrl', 500) &&
+             data.userBUid is string && data.userBUid in data.participantUids &&
+             data.userAUid != data.userBUid &&
+             data.userBName is string && data.userBName.size() >= 1 && data.userBName.size() <= 50 &&
+             isValidUsername(data.userBUsername) &&
+             isOptionalString(data, 'userBAvatarUrl', 500) &&
+             isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidConversation(data) {
+      return data.type in ['dm', 'group'] &&
+             isOptionalString(data, 'name', 80) &&
+             isOptionalString(data, 'iconUrl', 500) &&
+             data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 &&
+             isBoundedStringList(data.memberUids, 50) && data.memberUids.size() >= 1 &&
+             data.lastMessageText is string && data.lastMessageText.size() <= 500 &&
+             isOptionalString(data, 'lastMessageSenderUid', 128) &&
+             isValidTimestamp(data.lastMessageAt) &&
+             isBoundedStringList(data.typingUids, 20) &&
+             isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidChatMessage(data) {
+      return isOptionalString(data, 'conversationId', 128) &&
+             isOptionalString(data, 'serverId', 128) &&
+             isOptionalString(data, 'channelId', 128) &&
+             data.senderUid is string && data.senderUid.size() >= 1 && data.senderUid.size() <= 128 &&
+             data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 50 &&
+             isOptionalString(data, 'senderAvatarUrl', 500) &&
+             isBoundedStringList(data.memberUids, 200) && data.memberUids.size() >= 1 &&
+             data.text is string && data.text.size() <= 4000 &&
+             isOptionalString(data, 'replyToMessageId', 128) &&
+             isOptionalString(data, 'replyToPreview', 200) &&
+             isOptionalString(data, 'attachmentUrl', 500) &&
+             isOptionalString(data, 'attachmentName', 160) &&
+             (!('attachmentType' in data) || data.attachmentType in ['image', 'file']) &&
+             isOptionalString(data, 'linkUrl', 500) &&
+             isOptionalString(data, 'linkTitle', 200) &&
+             isOptionalString(data, 'linkPlatform', 80) &&
+             isOptionalString(data, 'linkDescription', 300) &&
+             isOptionalString(data, 'linkThumbnailUrl', 500) &&
+             data.reactions is map && data.reactions.size() <= 25 &&
+             isBoundedStringList(data.readByUids, 50) &&
+             data.edited is bool &&
+             data.deleted is bool &&
+             isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidServer(data) {
+      return data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+             data.description is string && data.description.size() <= 300 &&
+             isOptionalString(data, 'iconUrl', 500) &&
+             isOptionalString(data, 'bannerUrl', 500) &&
+             data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 &&
+             isBoundedStringList(data.memberUids, 200) && data.memberUids.size() >= 1 &&
+             data.ownerUid in data.memberUids &&
+             isOptionalString(data, 'inviteCode', 32) &&
+             isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidServerMember(data, serverId, memberUid) {
+      return data.userId is string && data.userId == memberUid &&
+             data.serverId is string && data.serverId == serverId &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 50 &&
+             isOptionalString(data, 'avatarUrl', 500) &&
+             data.roleId is string && data.roleId.size() >= 1 && data.roleId.size() <= 128 &&
+             data.roleName is string && data.roleName.size() >= 1 && data.roleName.size() <= 50 &&
+             isBoundedStringList(data.permissions, 20) &&
+             isOptionalString(data, 'nickname', 50) &&
+             isValidTimestamp(data.joinedAt) && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidServerRole(data, serverId) {
+      return data.serverId is string && data.serverId == serverId &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 50 &&
+             data.colorHex is int &&
+             isBoundedStringList(data.permissions, 20) &&
+             data.position is int && data.position >= 0 && data.position <= 100 &&
+             isBoundedStringList(data.memberUids, 200) &&
+             isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidServerChannel(data, serverId) {
+      return data.serverId is string && data.serverId == serverId &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 60 &&
+             isOptionalString(data, 'topic', 200) &&
+             data.type in ['text', 'voice'] &&
+             data.position is int && data.position >= 0 && data.position <= 200 &&
+             isBoundedStringList(data.memberUids, 200) &&
+             isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidInvite(data, code) {
+      return data.code is string && data.code == code &&
+             data.serverId is string && data.serverId.size() >= 1 && data.serverId.size() <= 128 &&
+             data.serverName is string && data.serverName.size() >= 1 && data.serverName.size() <= 80 &&
+             isOptionalString(data, 'serverIconUrl', 500) &&
+             data.serverOwnerUid is string && data.serverOwnerUid.size() <= 128 &&
+             data.creatorUid is string && data.creatorUid.size() <= 128 &&
+             data.maxUses is int && data.maxUses >= 0 && data.maxUses <= 1000 &&
+             data.uses is int && data.uses >= 0 && data.uses <= 1000 &&
+             isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidModerationLog(data, serverId) {
+      return data.serverId is string && data.serverId == serverId &&
+             data.actorUid is string && data.actorUid.size() <= 128 &&
+             data.actorName is string && data.actorName.size() >= 1 && data.actorName.size() <= 50 &&
+             data.action in ['kick', 'ban', 'delete_message', 'role_change', 'invite_create', 'channel_manage'] &&
+             isOptionalString(data, 'targetUid', 128) &&
+             data.details is string && data.details.size() <= 300 &&
+             isBoundedStringList(data.memberUids, 200) &&
+             isValidTimestamp(data.createdAt);
+    }
+
+    function isValidServerBan(data, serverId, bannedUid) {
+      return data.serverId is string && data.serverId == serverId &&
+             data.userId is string && data.userId == bannedUid &&
+             data.reason is string && data.reason.size() <= 300 &&
+             data.bannedByUid is string && data.bannedByUid.size() <= 128 &&
+             isValidTimestamp(data.createdAt);
+    }
+
+    function isValidCallSession(data) {
+      return data.contextType in ['dm', 'group', 'voice_channel'] &&
+             data.contextId is string && data.contextId.size() >= 1 && data.contextId.size() <= 128 &&
+             isOptionalString(data, 'serverId', 128) &&
+             data.callerUid is string && data.callerUid.size() >= 1 && data.callerUid.size() <= 128 &&
+             data.callerName is string && data.callerName.size() >= 1 && data.callerName.size() <= 50 &&
+             data.callType in ['audio', 'video'] &&
+             data.status in ['ringing', 'active', 'ended', 'declined'] &&
+             isBoundedStringList(data.participantUids, 50) && data.participantUids.size() >= 1 &&
+             isBoundedStringList(data.activeUids, 50) &&
+             isOptionalString(data, 'screenSharingUid', 128) &&
+             isOptionalString(data, 'sfuRoomUrl', 500) &&
+             isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidCallSignal(data, callId) {
+      return data.callId is string && data.callId == callId &&
+             data.fromUid is string && data.fromUid.size() >= 1 && data.fromUid.size() <= 128 &&
+             data.toUid is string && data.toUid.size() >= 1 && data.toUid.size() <= 128 &&
+             data.type in ['offer', 'answer', 'ice', 'bye'] &&
+             isOptionalString(data, 'sdp', 32000) &&
+             isOptionalString(data, 'iceCandidate', 4000) &&
+             isOptionalString(data, 'sdpMid', 64) &&
+             (!('sdpMLineIndex' in data) || data.sdpMLineIndex is int) &&
+             isBoundedStringList(data.participantUids, 50) &&
+             isValidTimestamp(data.createdAt);
+    }
+
+    function isValidReport(data) {
+      return data.reporterUid is string && data.reporterUid.size() >= 1 && data.reporterUid.size() <= 128 &&
+             data.targetUid is string && data.targetUid.size() >= 1 && data.targetUid.size() <= 128 &&
+             isOptionalString(data, 'targetMessageId', 128) &&
+             isOptionalString(data, 'serverId', 128) &&
+             data.reason is string && data.reason.size() >= 1 && data.reason.size() <= 100 &&
+             data.details is string && data.details.size() <= 1000 &&
+             data.status == 'open' &&
+             isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt);
+    }
+
+    // --- COLLECTION RULES ---
+
+    match /usernames/{username} {
+      allow get: if isSignedIn() && isValidUsername(username);
+      allow list: if false;
+      allow create: if isSignedIn() &&
+                       isValidUsername(username) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'username', 'displayName', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'username', 'displayName', 'avatarUrl', 'createdAt', 'updatedAt']) &&
+                       isValidUsernameClaim(incoming(), username);
+      allow update: if isSignedIn() &&
+                       isValidUsername(username) &&
+                       existing().userId == request.auth.uid &&
+                       incoming().userId == existing().userId &&
+                       incoming().username == existing().username &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidUsernameClaim(incoming(), username) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'avatarUrl', 'updatedAt']);
+      allow delete: if isSignedIn() && isValidUsername(username) && existing().userId == request.auth.uid;
+    }
+
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId);
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       incoming().keys().hasAll(['userId', 'username', 'displayName', 'bio', 'statusText', 'presence', 'primaryColorHex', 'secondaryColorHex', 'gradientEnabled', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'username', 'displayName', 'bio', 'statusText', 'presence', 'avatarUrl', 'bannerUrl', 'bannerVideoUrl', 'primaryColorHex', 'secondaryColorHex', 'gradientEnabled', 'fcmToken', 'createdAt', 'updatedAt']) &&
+                       isValidUserProfile(incoming(), userId);
+      allow update: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidUserProfile(incoming(), userId) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['username', 'displayName', 'bio', 'statusText', 'presence', 'avatarUrl', 'bannerUrl', 'bannerVideoUrl', 'primaryColorHex', 'secondaryColorHex', 'gradientEnabled', 'fcmToken', 'updatedAt']);
+      allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+
+      match /private/{docId} {
+        allow get: if isSignedIn() && isValidId(userId) && isValidId(docId) && request.auth.uid == userId;
+        allow list: if isSignedIn() && request.auth.uid == userId;
+        allow create: if isSignedIn() &&
+                         isValidId(userId) && isValidId(docId) &&
+                         request.auth.uid == userId &&
+                         incoming().keys().hasAll(['userId', 'blockedUids', 'notifyMessages', 'notifyFriendRequests', 'notifyInvites', 'notifyCalls', 'notifyMentions', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'email', 'blockedUids', 'notifyMessages', 'notifyFriendRequests', 'notifyInvites', 'notifyCalls', 'notifyMentions', 'createdAt', 'updatedAt']) &&
+                         isValidPrivateAccount(incoming(), userId);
+        allow update: if isSignedIn() &&
+                         isValidId(userId) && isValidId(docId) &&
+                         request.auth.uid == userId &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidPrivateAccount(incoming(), userId) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['email', 'blockedUids', 'notifyMessages', 'notifyFriendRequests', 'notifyInvites', 'notifyCalls', 'notifyMentions', 'updatedAt']);
+        allow delete: if isSignedIn() && isValidId(userId) && isValidId(docId) && request.auth.uid == userId;
+      }
+    }
+
+    match /friend_requests/{requestId} {
+      allow get: if isSignedIn() && isValidId(requestId) && request.auth.uid in existing().participantUids;
+      allow list: if isSignedIn() && request.auth.uid in resource.data.participantUids;
+      allow create: if isSignedIn() &&
+                       isValidId(requestId) &&
+                       incoming().fromUid == request.auth.uid &&
+                       incoming().status == 'pending' &&
+                       incoming().keys().hasAll(['fromUid', 'fromUsername', 'fromDisplayName', 'toUid', 'toUsername', 'toDisplayName', 'status', 'participantUids', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['fromUid', 'fromUsername', 'fromDisplayName', 'fromAvatarUrl', 'toUid', 'toUsername', 'toDisplayName', 'toAvatarUrl', 'status', 'participantUids', 'createdAt', 'updatedAt']) &&
+                       isValidFriendRequest(incoming());
+      allow update: if isSignedIn() &&
+                       isValidId(requestId) &&
+                       isValidFriendRequest(incoming()) &&
+                       existing().status == 'pending' &&
+                       request.auth.uid == existing().toUid &&
+                       incoming().status in ['accepted', 'declined'] &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
+      allow delete: if isSignedIn() && isValidId(requestId) && request.auth.uid in existing().participantUids;
+    }
+
+    match /friendships/{friendshipId} {
+      allow get: if isSignedIn() && isValidId(friendshipId) && request.auth.uid in existing().participantUids;
+      allow list: if isSignedIn() && request.auth.uid in resource.data.participantUids;
+      allow create: if isSignedIn() &&
+                       isValidId(friendshipId) &&
+                       request.auth.uid in incoming().participantUids &&
+                       incoming().keys().hasAll(['participantUids', 'userAUid', 'userAName', 'userAUsername', 'userBUid', 'userBName', 'userBUsername', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['participantUids', 'userAUid', 'userAName', 'userAUsername', 'userAAvatarUrl', 'userBUid', 'userBName', 'userBUsername', 'userBAvatarUrl', 'createdAt', 'updatedAt']) &&
+                       isValidFriendship(incoming());
+      allow update: if false;
+      allow delete: if isSignedIn() && isValidId(friendshipId) && request.auth.uid in existing().participantUids;
+    }
+
+    match /conversations/{conversationId} {
+      allow get: if isSignedIn() && isValidId(conversationId) && request.auth.uid in existing().memberUids;
+      allow list: if isSignedIn() && request.auth.uid in resource.data.memberUids;
+      allow create: if isSignedIn() &&
+                       isValidId(conversationId) &&
+                       incoming().ownerUid == request.auth.uid &&
+                       request.auth.uid in incoming().memberUids &&
+                       incoming().keys().hasAll(['type', 'ownerUid', 'memberUids', 'lastMessageText', 'lastMessageAt', 'typingUids', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['type', 'name', 'iconUrl', 'ownerUid', 'memberUids', 'lastMessageText', 'lastMessageSenderUid', 'lastMessageAt', 'typingUids', 'createdAt', 'updatedAt']) &&
+                       isValidConversation(incoming());
+      allow update: if isSignedIn() &&
+                       isValidId(conversationId) &&
+                       request.auth.uid in existing().memberUids &&
+                       incoming().ownerUid == existing().ownerUid &&
+                       incoming().type == existing().type &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidConversation(incoming()) && (
+                         // Action 1: Update last message metadata
+                         incoming().diff(existing()).affectedKeys().hasOnly(['lastMessageText', 'lastMessageSenderUid', 'lastMessageAt', 'updatedAt']) ||
+                         // Action 2: Update typing indicators
+                         incoming().diff(existing()).affectedKeys().hasOnly(['typingUids', 'updatedAt']) ||
+                         // Action 3: Group settings / member management (owner or group member)
+                         (existing().type == 'group' && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'iconUrl', 'memberUids', 'updatedAt']))
+                       );
+      allow delete: if isSignedIn() && isValidId(conversationId) && existing().ownerUid == request.auth.uid;
+
+      match /messages/{messageId} {
+        allow get: if isSignedIn() && isValidId(conversationId) && isValidId(messageId) && request.auth.uid in existing().memberUids;
+        allow list: if isSignedIn() && request.auth.uid in resource.data.memberUids;
+        allow create: if isSignedIn() &&
+                         isValidId(conversationId) && isValidId(messageId) &&
+                         incoming().senderUid == request.auth.uid &&
+                         incoming().conversationId == conversationId &&
+                         incoming().keys().hasAll(['conversationId', 'senderUid', 'senderName', 'memberUids', 'text', 'reactions', 'readByUids', 'edited', 'deleted', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['conversationId', 'senderUid', 'senderName', 'senderAvatarUrl', 'memberUids', 'text', 'replyToMessageId', 'replyToPreview', 'attachmentUrl', 'attachmentName', 'attachmentType', 'linkUrl', 'linkTitle', 'linkPlatform', 'linkDescription', 'linkThumbnailUrl', 'reactions', 'readByUids', 'edited', 'deleted', 'createdAt', 'updatedAt']) &&
+                         isValidChatMessage(incoming()) &&
+                         exists(/databases/$(database)/documents/conversations/$(conversationId)) &&
+                         request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.memberUids &&
+                         incoming().memberUids == get(/databases/$(database)/documents/conversations/$(conversationId)).data.memberUids;
+        allow update: if isSignedIn() &&
+                         isValidId(conversationId) && isValidId(messageId) &&
+                         request.auth.uid in existing().memberUids &&
+                         incoming().senderUid == existing().senderUid &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidChatMessage(incoming()) && (
+                           // Action 1: Author edits or soft-deletes own message
+                           (existing().senderUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['text', 'edited', 'deleted', 'updatedAt'])) ||
+                           // Action 2: Participant toggles emoji reaction
+                           incoming().diff(existing()).affectedKeys().hasOnly(['reactions', 'updatedAt']) ||
+                           // Action 3: Participant marks message as read
+                           incoming().diff(existing()).affectedKeys().hasOnly(['readByUids', 'updatedAt'])
+                         );
+        allow delete: if isSignedIn() && isValidId(conversationId) && isValidId(messageId) && existing().senderUid == request.auth.uid;
+      }
+    }
+
+    match /servers/{serverId} {
+      allow get: if isSignedIn() && isValidId(serverId) && request.auth.uid in existing().memberUids;
+      allow list: if isSignedIn() && request.auth.uid in resource.data.memberUids;
+      allow create: if isSignedIn() &&
+                       isValidId(serverId) &&
+                       incoming().ownerUid == request.auth.uid &&
+                       incoming().keys().hasAll(['name', 'description', 'ownerUid', 'memberUids', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['name', 'description', 'iconUrl', 'bannerUrl', 'ownerUid', 'memberUids', 'inviteCode', 'createdAt', 'updatedAt']) &&
+                       isValidServer(incoming());
+      allow update: if isSignedIn() &&
+                       isValidId(serverId) &&
+                       incoming().ownerUid == existing().ownerUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidServer(incoming()) && (
+                         // Action 1: Admin/Owner edits server profile or inviteCode
+                         (hasServerPermission(serverId, 'ADMIN_SERVER') && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'iconUrl', 'bannerUrl', 'inviteCode', 'updatedAt'])) ||
+                         // Action 2: Member manager kicks/bans/adds members
+                         (hasServerPermission(serverId, 'MANAGE_MEMBERS') && incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt'])) ||
+                         // Action 3: Non-banned user joins via invite (adds only self to memberUids)
+                         (!(request.auth.uid in existing().memberUids) &&
+                          request.auth.uid in incoming().memberUids &&
+                          incoming().memberUids.size() == existing().memberUids.size() + 1 &&
+                          incoming().memberUids.hasAll(existing().memberUids) &&
+                          !isBannedFromServer(serverId, request.auth.uid) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt'])) ||
+                         // Action 4: Non-owner member leaves server (removes only self)
+                         (request.auth.uid in existing().memberUids &&
+                          request.auth.uid != existing().ownerUid &&
+                          !(request.auth.uid in incoming().memberUids) &&
+                          existing().memberUids.size() == incoming().memberUids.size() + 1 &&
+                          existing().memberUids.hasAll(incoming().memberUids) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt']))
+                       );
+      allow delete: if isSignedIn() && isValidId(serverId) && existing().ownerUid == request.auth.uid;
+
+      match /members/{memberUid} {
+        allow get: if isSignedIn() && isValidId(serverId) && isValidId(memberUid) && isServerMember(serverId);
+        allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+        allow create: if isSignedIn() &&
+                         isValidId(serverId) && isValidId(memberUid) &&
+                         incoming().keys().hasAll(['userId', 'serverId', 'displayName', 'roleId', 'roleName', 'permissions', 'joinedAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'serverId', 'displayName', 'avatarUrl', 'roleId', 'roleName', 'permissions', 'nickname', 'joinedAt', 'updatedAt']) &&
+                         isValidServerMember(incoming(), serverId, memberUid) && (
+                           // Server owner initializes own founder membership
+                           (request.auth.uid == memberUid && isServerOwner(serverId)) ||
+                           // Joining user creates default Member record (must not self-escalate permissions)
+                           (request.auth.uid == memberUid &&
+                            !isBannedFromServer(serverId, memberUid) &&
+                            incoming().roleId == 'member' &&
+                            incoming().permissions.hasOnly(['SEND_MESSAGES', 'CONNECT_VOICE']))
+                         );
+        allow update: if isSignedIn() &&
+                         isValidId(serverId) && isValidId(memberUid) &&
+                         incoming().userId == existing().userId &&
+                         incoming().serverId == existing().serverId &&
+                         incoming().joinedAt == existing().joinedAt &&
+                         isValidServerMember(incoming(), serverId, memberUid) && (
+                           // Role manager updates role/permissions
+                           (hasServerPermission(serverId, 'MANAGE_ROLES') && incoming().diff(existing()).affectedKeys().hasOnly(['roleId', 'roleName', 'permissions', 'updatedAt'])) ||
+                           // Member updates own display/nickname/avatar
+                           (request.auth.uid == memberUid && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'avatarUrl', 'nickname', 'updatedAt']))
+                         );
+        allow delete: if isSignedIn() && isValidId(serverId) && isValidId(memberUid) && (
+          request.auth.uid == memberUid || hasServerPermission(serverId, 'MANAGE_MEMBERS')
+        );
+      }
+
+      match /roles/{roleId} {
+        allow get: if isSignedIn() && isValidId(serverId) && isValidId(roleId) && request.auth.uid in existing().memberUids;
+        allow list: if isSignedIn() && request.auth.uid in resource.data.memberUids;
+        allow create: if isSignedIn() &&
+                         isValidId(serverId) && isValidId(roleId) &&
+                         incoming().keys().hasAll(['serverId', 'name', 'colorHex', 'permissions', 'position', 'memberUids', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['serverId', 'name', 'colorHex', 'permissions', 'position', 'memberUids', 'createdAt', 'updatedAt']) &&
+                         isValidServerRole(incoming(), serverId) &&
+                         hasServerPermission(serverId, 'MANAGE_ROLES');
+        allow update: if isSignedIn() &&
+                         isValidId(serverId) && isValidId(roleId) &&
+                         incoming().serverId == existing().serverId &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidServerRole(incoming(), serverId) && (
+                           (hasServerPermission(serverId, 'MANAGE_ROLES') && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'colorHex', 'permissions', 'position', 'memberUids', 'updatedAt'])) ||
+                           // Sync memberUids when a user joins/leaves
+                           (incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt']) &&
+                            (isServerMember(serverId) || hasServerPermission(serverId, 'MANAGE_MEMBERS')))
+                         );
+        allow delete: if isSignedIn() && isValidId(serverId) && isValidId(roleId) && hasServerPermission(serverId, 'MANAGE_ROLES');
+      }
+
+      match /channels/{channelId} {
+        allow get: if isSignedIn() && isValidId(serverId) && isValidId(channelId) && request.auth.uid in existing().memberUids;
+        allow list: if isSignedIn() && request.auth.uid in resource.data.memberUids;
+        allow create: if isSignedIn() &&
+                         isValidId(serverId) && isValidId(channelId) &&
+                         incoming().keys().hasAll(['serverId', 'name', 'type', 'position', 'memberUids', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['serverId', 'name', 'topic', 'type', 'position', 'memberUids', 'createdAt', 'updatedAt']) &&
+                         isValidServerChannel(incoming(), serverId) &&
+                         hasServerPermission(serverId, 'MANAGE_CHANNELS');
+        allow update: if isSignedIn() &&
+                         isValidId(serverId) && isValidId(channelId) &&
+                         incoming().serverId == existing().serverId &&
+                         incoming().type == existing().type &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidServerChannel(incoming(), serverId) && (
+                           (hasServerPermission(serverId, 'MANAGE_CHANNELS') && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'topic', 'position', 'memberUids', 'updatedAt'])) ||
+                           (incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt']) &&
+                            (isServerMember(serverId) || hasServerPermission(serverId, 'MANAGE_MEMBERS')))
+                         );
+        allow delete: if isSignedIn() && isValidId(serverId) && isValidId(channelId) && hasServerPermission(serverId, 'MANAGE_CHANNELS');
+
+        match /messages/{messageId} {
+          allow get: if isSignedIn() && isValidId(serverId) && isValidId(channelId) && isValidId(messageId) && request.auth.uid in existing().memberUids;
+          allow list: if isSignedIn() && request.auth.uid in resource.data.memberUids;
+          allow create: if isSignedIn() &&
+                           isValidId(serverId) && isValidId(channelId) && isValidId(messageId) &&
+                           incoming().senderUid == request.auth.uid &&
+                           incoming().serverId == serverId &&
+                           incoming().channelId == channelId &&
+                           incoming().keys().hasAll(['serverId', 'channelId', 'senderUid', 'senderName', 'memberUids', 'text', 'reactions', 'readByUids', 'edited', 'deleted', 'createdAt', 'updatedAt']) &&
+                           incoming().keys().hasOnly(['serverId', 'channelId', 'senderUid', 'senderName', 'senderAvatarUrl', 'memberUids', 'text', 'replyToMessageId', 'replyToPreview', 'attachmentUrl', 'attachmentName', 'attachmentType', 'linkUrl', 'linkTitle', 'linkPlatform', 'linkDescription', 'linkThumbnailUrl', 'reactions', 'readByUids', 'edited', 'deleted', 'createdAt', 'updatedAt']) &&
+                           isValidChatMessage(incoming()) &&
+                           hasServerPermission(serverId, 'SEND_MESSAGES') &&
+                           incoming().memberUids == serverDoc(serverId).memberUids;
+          allow update: if isSignedIn() &&
+                           isValidId(serverId) && isValidId(channelId) && isValidId(messageId) &&
+                           request.auth.uid in existing().memberUids &&
+                           incoming().senderUid == existing().senderUid &&
+                           incoming().createdAt == existing().createdAt &&
+                           isValidChatMessage(incoming()) && (
+                             (existing().senderUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['text', 'edited', 'deleted', 'updatedAt'])) ||
+                             (hasServerPermission(serverId, 'DELETE_MESSAGES') && incoming().diff(existing()).affectedKeys().hasOnly(['text', 'deleted', 'updatedAt'])) ||
+                             incoming().diff(existing()).affectedKeys().hasOnly(['reactions', 'updatedAt']) ||
+                             incoming().diff(existing()).affectedKeys().hasOnly(['readByUids', 'updatedAt'])
+                           );
+          allow delete: if isSignedIn() && isValidId(serverId) && isValidId(channelId) && isValidId(messageId) && (
+            existing().senderUid == request.auth.uid || hasServerPermission(serverId, 'DELETE_MESSAGES')
+          );
+        }
+      }
+
+      match /moderation_logs/{logId} {
+        allow get: if isSignedIn() && isValidId(serverId) && isValidId(logId) && request.auth.uid in existing().memberUids;
+        allow list: if isSignedIn() && request.auth.uid in resource.data.memberUids;
+        allow create: if isSignedIn() &&
+                         isValidId(serverId) && isValidId(logId) &&
+                         incoming().actorUid == request.auth.uid &&
+                         incoming().keys().hasAll(['serverId', 'actorUid', 'actorName', 'action', 'details', 'memberUids', 'createdAt']) &&
+                         incoming().keys().hasOnly(['serverId', 'actorUid', 'actorName', 'action', 'targetUid', 'details', 'memberUids', 'createdAt']) &&
+                         isValidModerationLog(incoming(), serverId) &&
+                         (hasServerPermission(serverId, 'MANAGE_MEMBERS') || hasServerPermission(serverId, 'DELETE_MESSAGES') || hasServerPermission(serverId, 'MANAGE_CHANNELS') || hasServerPermission(serverId, 'INVITE_MEMBERS'));
+        allow update, delete: if false;
+      }
+
+      match /bans/{bannedUid} {
+        allow get: if isSignedIn() && isValidId(serverId) && isValidId(bannedUid) && (
+          request.auth.uid == bannedUid || hasServerPermission(serverId, 'MANAGE_MEMBERS')
+        );
+        allow list: if isSignedIn() && resource.data.bannedByUid == request.auth.uid;
+        allow create: if isSignedIn() &&
+                         isValidId(serverId) && isValidId(bannedUid) &&
+                         incoming().bannedByUid == request.auth.uid &&
+                         incoming().keys().hasAll(['serverId', 'userId', 'reason', 'bannedByUid', 'createdAt']) &&
+                         incoming().keys().hasOnly(['serverId', 'userId', 'reason', 'bannedByUid', 'createdAt']) &&
+                         isValidServerBan(incoming(), serverId, bannedUid) &&
+                         hasServerPermission(serverId, 'MANAGE_MEMBERS');
+        allow update: if false;
+        allow delete: if isSignedIn() && isValidId(serverId) && isValidId(bannedUid) && hasServerPermission(serverId, 'MANAGE_MEMBERS');
+      }
+    }
+
+    match /invites/{inviteCode} {
+      allow get: if isSignedIn() && isValidId(inviteCode);
+      allow list: if isSignedIn() && (resource.data.creatorUid == request.auth.uid || resource.data.serverOwnerUid == request.auth.uid);
+      allow create: if isSignedIn() &&
+                       isValidId(inviteCode) &&
+                       incoming().creatorUid == request.auth.uid &&
+                       incoming().keys().hasAll(['code', 'serverId', 'serverName', 'serverOwnerUid', 'creatorUid', 'maxUses', 'uses', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['code', 'serverId', 'serverName', 'serverIconUrl', 'serverOwnerUid', 'creatorUid', 'maxUses', 'uses', 'createdAt', 'updatedAt']) &&
+                       isValidInvite(incoming(), inviteCode) &&
+                       hasServerPermission(incoming().serverId, 'INVITE_MEMBERS');
+      allow update: if isSignedIn() &&
+                       isValidId(inviteCode) &&
+                       incoming().code == existing().code &&
+                       incoming().serverId == existing().serverId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidInvite(incoming(), inviteCode) && (
+                         (incoming().uses == existing().uses + 1 &&
+                          (existing().maxUses == 0 || incoming().uses <= existing().maxUses) &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['uses', 'updatedAt'])) ||
+                         (hasServerPermission(existing().serverId, 'INVITE_MEMBERS') &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['maxUses', 'updatedAt']))
+                       );
+      allow delete: if isSignedIn() && isValidId(inviteCode) && (
+        existing().creatorUid == request.auth.uid || hasServerPermission(existing().serverId, 'INVITE_MEMBERS')
+      );
+    }
+
+    match /calls/{callId} {
+      allow get: if isSignedIn() && isValidId(callId) && request.auth.uid in existing().participantUids;
+      allow list: if isSignedIn() && request.auth.uid in resource.data.participantUids;
+      allow create: if isSignedIn() &&
+                       isValidId(callId) &&
+                       incoming().callerUid == request.auth.uid &&
+                       request.auth.uid in incoming().participantUids &&
+                       incoming().keys().hasAll(['contextType', 'contextId', 'callerUid', 'callerName', 'callType', 'status', 'participantUids', 'activeUids', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['contextType', 'contextId', 'serverId', 'callerUid', 'callerName', 'callType', 'status', 'participantUids', 'activeUids', 'screenSharingUid', 'sfuRoomUrl', 'createdAt', 'updatedAt']) &&
+                       isValidCallSession(incoming());
+      allow update: if isSignedIn() &&
+                       isValidId(callId) &&
+                       request.auth.uid in existing().participantUids &&
+                       !(existing().status in ['ended', 'declined']) &&
+                       incoming().callerUid == existing().callerUid &&
+                       incoming().contextId == existing().contextId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidCallSession(incoming()) && (
+                         incoming().diff(existing()).affectedKeys().hasOnly(['status', 'activeUids', 'updatedAt']) ||
+                         incoming().diff(existing()).affectedKeys().hasOnly(['screenSharingUid', 'updatedAt']) ||
+                         incoming().diff(existing()).affectedKeys().hasOnly(['participantUids', 'activeUids', 'updatedAt'])
+                       );
+      allow delete: if isSignedIn() && isValidId(callId) && existing().callerUid == request.auth.uid;
+
+      match /signals/{signalId} {
+        allow get: if isSignedIn() && isValidId(callId) && isValidId(signalId) && request.auth.uid in existing().participantUids;
+        allow list: if isSignedIn() && request.auth.uid in resource.data.participantUids;
+        allow create: if isSignedIn() &&
+                         isValidId(callId) && isValidId(signalId) &&
+                         incoming().fromUid == request.auth.uid &&
+                         request.auth.uid in incoming().participantUids &&
+                         incoming().keys().hasAll(['callId', 'fromUid', 'toUid', 'type', 'participantUids', 'createdAt']) &&
+                         incoming().keys().hasOnly(['callId', 'fromUid', 'toUid', 'type', 'sdp', 'iceCandidate', 'sdpMid', 'sdpMLineIndex', 'participantUids', 'createdAt']) &&
+                         isValidCallSignal(incoming(), callId);
+        allow update: if false;
+        allow delete: if isSignedIn() && isValidId(callId) && isValidId(signalId) && request.auth.uid in existing().participantUids;
+      }
+    }
+
+    match /reports/{reportId} {
+      allow get: if isSignedIn() && isValidId(reportId) && existing().reporterUid == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.reporterUid == request.auth.uid;
+      allow create: if isSignedIn() &&
+                       isValidId(reportId) &&
+                       incoming().reporterUid == request.auth.uid &&
+                       incoming().keys().hasAll(['reporterUid', 'targetUid', 'reason', 'details', 'status', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['reporterUid', 'targetUid', 'targetMessageId', 'serverId', 'reason', 'details', 'status', 'createdAt', 'updatedAt']) &&
+                       isValidReport(incoming());
+      allow update, delete: if false;
+    }
+  }
+}

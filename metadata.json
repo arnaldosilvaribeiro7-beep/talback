@@ -1,0 +1,6 @@
+{
+  "name": "Talkback",
+  "description": "Aplicativo Android nativo de comunicação social inspirado no Discord com mensagens privadas, servidores, canais de texto e voz, chamadas de áudio e vídeo e compartilhamento de tela.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

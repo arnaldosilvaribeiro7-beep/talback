@@ -1,0 +1,393 @@
+{
+  "entities": {
+    "UsernameClaim": {
+      "title": "UsernameClaim",
+      "description": "Maps a unique lowercase Talkback username to a user UID for friend lookup.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "username": { "type": "string" },
+        "displayName": { "type": "string" },
+        "avatarUrl": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["userId", "username", "displayName", "createdAt", "updatedAt"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Public profile and visual theme configuration for a Talkback user (no PII).",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "username": { "type": "string" },
+        "displayName": { "type": "string" },
+        "bio": { "type": "string" },
+        "statusText": { "type": "string" },
+        "presence": { "type": "string", "enum": ["online", "idle", "dnd", "offline"] },
+        "avatarUrl": { "type": "string" },
+        "bannerUrl": { "type": "string" },
+        "bannerVideoUrl": { "type": "string" },
+        "primaryColorHex": { "type": "integer" },
+        "secondaryColorHex": { "type": "integer" },
+        "gradientEnabled": { "type": "boolean" },
+        "fcmToken": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["userId", "username", "displayName", "bio", "statusText", "presence", "primaryColorHex", "secondaryColorHex", "gradientEnabled", "createdAt", "updatedAt"]
+    },
+    "PrivateAccount": {
+      "title": "PrivateAccount",
+      "description": "Isolated PII, blocked UIDs, and notification preferences owned strictly by the user.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "email": { "type": "string" },
+        "blockedUids": { "type": "array" },
+        "notifyMessages": { "type": "boolean" },
+        "notifyFriendRequests": { "type": "boolean" },
+        "notifyInvites": { "type": "boolean" },
+        "notifyCalls": { "type": "boolean" },
+        "notifyMentions": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["userId", "blockedUids", "notifyMessages", "notifyFriendRequests", "notifyInvites", "notifyCalls", "notifyMentions", "createdAt", "updatedAt"]
+    },
+    "FriendRequest": {
+      "title": "FriendRequest",
+      "description": "Pending, accepted, or declined friend request between two users.",
+      "type": "object",
+      "properties": {
+        "fromUid": { "type": "string" },
+        "fromUsername": { "type": "string" },
+        "fromDisplayName": { "type": "string" },
+        "fromAvatarUrl": { "type": "string" },
+        "toUid": { "type": "string" },
+        "toUsername": { "type": "string" },
+        "toDisplayName": { "type": "string" },
+        "toAvatarUrl": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "declined"] },
+        "participantUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["fromUid", "fromUsername", "fromDisplayName", "toUid", "toUsername", "toDisplayName", "status", "participantUids", "createdAt", "updatedAt"]
+    },
+    "Friendship": {
+      "title": "Friendship",
+      "description": "Confirmed bidirectional friendship between two users.",
+      "type": "object",
+      "properties": {
+        "participantUids": { "type": "array" },
+        "userAUid": { "type": "string" },
+        "userAName": { "type": "string" },
+        "userAUsername": { "type": "string" },
+        "userAAvatarUrl": { "type": "string" },
+        "userBUid": { "type": "string" },
+        "userBName": { "type": "string" },
+        "userBUsername": { "type": "string" },
+        "userBAvatarUrl": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["participantUids", "userAUid", "userAName", "userAUsername", "userBUid", "userBName", "userBUsername", "createdAt", "updatedAt"]
+    },
+    "Conversation": {
+      "title": "Conversation",
+      "description": "Private 1:1 DM or quick group chat independent of servers.",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["dm", "group"] },
+        "name": { "type": "string" },
+        "iconUrl": { "type": "string" },
+        "ownerUid": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "lastMessageText": { "type": "string" },
+        "lastMessageSenderUid": { "type": "string" },
+        "lastMessageAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
+        "typingUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["type", "ownerUid", "memberUids", "lastMessageText", "lastMessageAt", "typingUids", "createdAt", "updatedAt"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Real-time message in a DM, quick group, or server text channel.",
+      "type": "object",
+      "properties": {
+        "conversationId": { "type": "string" },
+        "serverId": { "type": "string" },
+        "channelId": { "type": "string" },
+        "senderUid": { "type": "string" },
+        "senderName": { "type": "string" },
+        "senderAvatarUrl": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "text": { "type": "string" },
+        "replyToMessageId": { "type": "string" },
+        "replyToPreview": { "type": "string" },
+        "attachmentUrl": { "type": "string" },
+        "attachmentName": { "type": "string" },
+        "attachmentType": { "type": "string", "enum": ["image", "file"] },
+        "linkUrl": { "type": "string" },
+        "linkTitle": { "type": "string" },
+        "linkPlatform": { "type": "string" },
+        "linkDescription": { "type": "string" },
+        "linkThumbnailUrl": { "type": "string" },
+        "reactions": { "type": "object" },
+        "readByUids": { "type": "array" },
+        "edited": { "type": "boolean" },
+        "deleted": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["senderUid", "senderName", "memberUids", "text", "reactions", "readByUids", "edited", "deleted", "createdAt", "updatedAt"]
+    },
+    "Server": {
+      "title": "Server",
+      "description": "Community server containing text/voice channels, roles, and members.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "iconUrl": { "type": "string" },
+        "bannerUrl": { "type": "string" },
+        "ownerUid": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "inviteCode": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["name", "description", "ownerUid", "memberUids", "createdAt", "updatedAt"]
+    },
+    "ServerMember": {
+      "title": "ServerMember",
+      "description": "Membership record with assigned role and RBAC permissions.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "serverId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "avatarUrl": { "type": "string" },
+        "roleId": { "type": "string" },
+        "roleName": { "type": "string" },
+        "permissions": { "type": "array" },
+        "nickname": { "type": "string" },
+        "joinedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["userId", "serverId", "displayName", "roleId", "roleName", "permissions", "joinedAt", "updatedAt"]
+    },
+    "ServerRole": {
+      "title": "ServerRole",
+      "description": "Configurable role inside a server with permission list.",
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string" },
+        "name": { "type": "string" },
+        "colorHex": { "type": "integer" },
+        "permissions": { "type": "array" },
+        "position": { "type": "integer" },
+        "memberUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["serverId", "name", "colorHex", "permissions", "position", "memberUids", "createdAt", "updatedAt"]
+    },
+    "ServerChannel": {
+      "title": "ServerChannel",
+      "description": "Text or voice channel inside a server.",
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string" },
+        "name": { "type": "string" },
+        "topic": { "type": "string" },
+        "type": { "type": "string", "enum": ["text", "voice"] },
+        "position": { "type": "integer" },
+        "memberUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["serverId", "name", "type", "position", "memberUids", "createdAt", "updatedAt"]
+    },
+    "ServerInvite": {
+      "title": "ServerInvite",
+      "description": "Shareable invite code for joining a server.",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string" },
+        "serverId": { "type": "string" },
+        "serverName": { "type": "string" },
+        "serverIconUrl": { "type": "string" },
+        "serverOwnerUid": { "type": "string" },
+        "creatorUid": { "type": "string" },
+        "maxUses": { "type": "integer" },
+        "uses": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["code", "serverId", "serverName", "serverOwnerUid", "creatorUid", "maxUses", "uses", "createdAt", "updatedAt"]
+    },
+    "ModerationLog": {
+      "title": "ModerationLog",
+      "description": "Audit log of moderation actions within a server.",
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string" },
+        "actorUid": { "type": "string" },
+        "actorName": { "type": "string" },
+        "action": { "type": "string", "enum": ["kick", "ban", "delete_message", "role_change", "invite_create", "channel_manage"] },
+        "targetUid": { "type": "string" },
+        "details": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["serverId", "actorUid", "actorName", "action", "details", "memberUids", "createdAt"]
+    },
+    "ServerBan": {
+      "title": "ServerBan",
+      "description": "Banned user record preventing re-entry via invites.",
+      "type": "object",
+      "properties": {
+        "serverId": { "type": "string" },
+        "userId": { "type": "string" },
+        "reason": { "type": "string" },
+        "bannedByUid": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["serverId", "userId", "reason", "bannedByUid", "createdAt"]
+    },
+    "CallSession": {
+      "title": "CallSession",
+      "description": "Active or historical audio/video call session with WebRTC/SFU metadata.",
+      "type": "object",
+      "properties": {
+        "contextType": { "type": "string", "enum": ["dm", "group", "voice_channel"] },
+        "contextId": { "type": "string" },
+        "serverId": { "type": "string" },
+        "callerUid": { "type": "string" },
+        "callerName": { "type": "string" },
+        "callType": { "type": "string", "enum": ["audio", "video"] },
+        "status": { "type": "string", "enum": ["ringing", "active", "ended", "declined"] },
+        "participantUids": { "type": "array" },
+        "activeUids": { "type": "array" },
+        "screenSharingUid": { "type": "string" },
+        "sfuRoomUrl": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["contextType", "contextId", "callerUid", "callerName", "callType", "status", "participantUids", "activeUids", "createdAt", "updatedAt"]
+    },
+    "CallSignal": {
+      "title": "CallSignal",
+      "description": "WebRTC SDP offer/answer or ICE candidate signal message.",
+      "type": "object",
+      "properties": {
+        "callId": { "type": "string" },
+        "fromUid": { "type": "string" },
+        "toUid": { "type": "string" },
+        "type": { "type": "string", "enum": ["offer", "answer", "ice", "bye"] },
+        "sdp": { "type": "string" },
+        "iceCandidate": { "type": "string" },
+        "sdpMid": { "type": "string" },
+        "sdpMLineIndex": { "type": "integer" },
+        "participantUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["callId", "fromUid", "toUid", "type", "participantUids", "createdAt"]
+    },
+    "UserReport": {
+      "title": "UserReport",
+      "description": "Abuse or moderation report submitted by a user.",
+      "type": "object",
+      "properties": {
+        "reporterUid": { "type": "string" },
+        "targetUid": { "type": "string" },
+        "targetMessageId": { "type": "string" },
+        "serverId": { "type": "string" },
+        "reason": { "type": "string" },
+        "details": { "type": "string" },
+        "status": { "type": "string", "enum": ["open"] },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["reporterUid", "targetUid", "reason", "details", "status", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/usernames/{username}": {
+      "schema": { "$ref": "#/entities/UsernameClaim" },
+      "description": "Unique username lookup directory."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Public profile and theme settings per user."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/PrivateAccount" },
+      "description": "Private PII, blocked users, and notification preferences."
+    },
+    "/friend_requests/{requestId}": {
+      "schema": { "$ref": "#/entities/FriendRequest" },
+      "description": "Friend requests between users."
+    },
+    "/friendships/{friendshipId}": {
+      "schema": { "$ref": "#/entities/Friendship" },
+      "description": "Active friendships between pairs of users."
+    },
+    "/conversations/{conversationId}": {
+      "schema": { "$ref": "#/entities/Conversation" },
+      "description": "1:1 DMs and quick group chats."
+    },
+    "/conversations/{conversationId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Messages inside a DM or quick group."
+    },
+    "/servers/{serverId}": {
+      "schema": { "$ref": "#/entities/Server" },
+      "description": "Community servers."
+    },
+    "/servers/{serverId}/members/{memberUid}": {
+      "schema": { "$ref": "#/entities/ServerMember" },
+      "description": "Server member roles and permissions."
+    },
+    "/servers/{serverId}/roles/{roleId}": {
+      "schema": { "$ref": "#/entities/ServerRole" },
+      "description": "Custom roles per server."
+    },
+    "/servers/{serverId}/channels/{channelId}": {
+      "schema": { "$ref": "#/entities/ServerChannel" },
+      "description": "Text and voice channels per server."
+    },
+    "/servers/{serverId}/channels/{channelId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Messages inside a server text channel."
+    },
+    "/servers/{serverId}/moderation_logs/{logId}": {
+      "schema": { "$ref": "#/entities/ModerationLog" },
+      "description": "Audit logs of server moderation actions."
+    },
+    "/servers/{serverId}/bans/{bannedUid}": {
+      "schema": { "$ref": "#/entities/ServerBan" },
+      "description": "Banned users per server."
+    },
+    "/invites/{inviteCode}": {
+      "schema": { "$ref": "#/entities/ServerInvite" },
+      "description": "Shareable invite codes."
+    },
+    "/calls/{callId}": {
+      "schema": { "$ref": "#/entities/CallSession" },
+      "description": "Voice/video calls and screen-sharing state."
+    },
+    "/calls/{callId}/signals/{signalId}": {
+      "schema": { "$ref": "#/entities/CallSignal" },
+      "description": "WebRTC SDP/ICE signaling packets."
+    },
+    "/reports/{reportId}": {
+      "schema": { "$ref": "#/entities/UserReport" },
+      "description": "User and message reports."
+    }
+  }
+}
