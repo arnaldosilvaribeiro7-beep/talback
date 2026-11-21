@@ -504,6 +504,9 @@ class WebRtcCallEngine(
         factory = null
         runCatching {
             val am = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                am.clearCommunicationDevice()
+            }
             am.mode = AudioManager.MODE_NORMAL
         }
         _state.value = WebRtcRuntimeState()

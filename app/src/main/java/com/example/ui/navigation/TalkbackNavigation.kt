@@ -13,12 +13,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
@@ -274,13 +277,18 @@ fun TalkbackMainShell(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding)
+                    .consumeWindowInsets(innerPadding)
             ) {
                 if (isWideScreen) {
                     NavigationRail(
                         containerColor = colors.railBackground,
                         modifier = Modifier
                             .fillMaxHeight()
-                            .windowInsetsPadding(WindowInsets.statusBars)
+                            .windowInsetsPadding(
+                                WindowInsets.safeDrawing.only(
+                                    WindowInsetsSides.Vertical + WindowInsetsSides.Start
+                                )
+                            )
                     ) {
                         TALKBACK_DESTINATIONS.forEach { item ->
                             val selected = currentDestination?.hasRoute(item.route::class) == true
@@ -314,7 +322,7 @@ fun TalkbackMainShell(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
-                        .windowInsetsPadding(WindowInsets.statusBars)
+                        .windowInsetsPadding(WindowInsets.safeDrawing)
                 ) {
                     if (activeCall == null && incomingCalls.isNotEmpty()) {
                         val ring = incomingCalls.first()
@@ -432,8 +440,7 @@ fun TalkbackMainShell(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .windowInsetsPadding(WindowInsets.statusBars)
-                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
             ) {
                 ActiveCallOverlay(
                     call = call,

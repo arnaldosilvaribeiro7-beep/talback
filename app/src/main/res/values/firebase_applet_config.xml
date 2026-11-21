@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8" standalone="no"?>
 <resources>
     <string name="firestore_database_id" translatable="false">ai-studio-android-talkback-6b398d18-d5c2-41eb-8893-aab5e5ba0932</string>
+    <string name="default_web_client_id" translatable="false">779151827350-6g1entndejhkl6glg44e536pq8td9uaq.apps.googleusercontent.com</string>
 </resources>

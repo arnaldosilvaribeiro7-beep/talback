@@ -28,11 +28,13 @@ class ExampleRobolectricTest {
     val composeTestRule = createComposeRule()
 
     @Test
-    fun `app metadata strings and firestore database id are configured for Talkback`() {
+    fun `app metadata strings and firebase resource ids are configured for Talkback`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         assertEquals("Talkback", context.getString(R.string.app_name))
         val dbId = context.getString(R.string.firestore_database_id)
         assertTrue(dbId.isNotBlank())
+        val webClientId = context.getString(R.string.default_web_client_id)
+        assertTrue(webClientId.endsWith(".apps.googleusercontent.com"))
     }
 
     @Test

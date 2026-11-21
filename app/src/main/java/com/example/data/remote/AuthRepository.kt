@@ -8,6 +8,7 @@ import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
+import androidx.credentials.exceptions.NoCredentialException
 import com.example.R
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
@@ -81,6 +82,8 @@ class AuthRepository(
                 } else {
                     onUnauthenticated()
                 }
+            } catch (_: NoCredentialException) {
+                onUnauthenticated()
             } catch (_: Exception) {
                 onUnauthenticated()
             }
@@ -121,6 +124,9 @@ class AuthRepository(
             } catch (e: GetCredentialCancellationException) {
                 Log.w("Auth", "Google Sign-In cancelled or dismissed: ${e.message}", e)
                 onAuthCancelled()
+            } catch (e: NoCredentialException) {
+                Log.w("Auth", "No Google credentials available on device: ${e.message}", e)
+                onAuthError("Nenhuma conta Google encontrada neste dispositivo. Adicione uma conta Google nas configurações.")
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
