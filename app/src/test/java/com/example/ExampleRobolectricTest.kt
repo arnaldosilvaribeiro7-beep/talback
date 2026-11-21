@@ -69,4 +69,11 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithText("Em chamada de voz").assertIsDisplayed()
         composeTestRule.onNodeWithText("Engenheira Android & Comunidades").assertIsDisplayed()
     }
+
+    @Test
+    fun `main activity launches without crashing`() {
+        val controller = org.robolectric.Robolectric.buildActivity(MainActivity::class.java).setup()
+        val activity = controller.get()
+        assertTrue(!activity.isFinishing)
+    }
 }
