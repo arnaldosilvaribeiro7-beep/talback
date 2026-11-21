@@ -171,6 +171,7 @@ data class ChatMessage(
     val attachmentUrl: String? = null,
     val attachmentName: String? = null,
     val attachmentType: String? = null,
+    val attachmentStoragePath: String? = null,
     val linkUrl: String? = null,
     val linkTitle: String? = null,
     val linkPlatform: String? = null,
@@ -180,6 +181,7 @@ data class ChatMessage(
     val readByUids: List<String> = emptyList(),
     val edited: Boolean = false,
     val deleted: Boolean = false,
+    val expiresAt: Timestamp? = null,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
@@ -335,6 +337,12 @@ data class LinkPreviewMetadata(
     val description: String,
     val thumbnailUrl: String?,
     val isDirectPlayableMedia: Boolean = false
+)
+
+data class UploadedMedia(
+    val downloadUrl: String,
+    val fileName: String,
+    val storagePath: String
 )
 
 sealed interface UiState<out T> {

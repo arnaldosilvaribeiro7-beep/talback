@@ -2,4 +2,10 @@
 <resources>
     <string name="firestore_database_id" translatable="false">ai-studio-android-talkback-6b398d18-d5c2-41eb-8893-aab5e5ba0932</string>
     <string name="default_web_client_id" translatable="false">779151827350-6g1entndejhkl6glg44e536pq8td9uaq.apps.googleusercontent.com</string>
+    <string name="gcm_defaultSenderId" translatable="false">779151827350</string>
+    <string name="google_api_key" translatable="false">AIzaSyCOd25294MDmh_UJLY09ctke4QnB3X-afM</string>
+    <string name="google_app_id" translatable="false">1:779151827350:android:e6ef78569306d66c097db7</string>
+    <string name="google_crash_reporting_api_key" translatable="false">AIzaSyCOd25294MDmh_UJLY09ctke4QnB3X-afM</string>
+    <string name="google_storage_bucket" translatable="false">gen-lang-client-0067289898.firebasestorage.app</string>
+    <string name="project_id" translatable="false">gen-lang-client-0067289898</string>
 </resources>

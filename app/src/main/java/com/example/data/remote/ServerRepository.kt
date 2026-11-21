@@ -29,7 +29,9 @@ import java.util.UUID
 class ServerRepository(
     private val db: FirebaseFirestore,
     private val linkPreviewFetcher: LinkPreviewFetcher = LinkPreviewFetcher(),
-    private val auth: FirebaseAuth = Firebase.auth
+    private val auth: FirebaseAuth = Firebase.auth,
+    private val serverClock: ServerClock = ServerClock(),
+    private val profileRepo: ProfileRepository? = null
 ) {
     private fun requireUserId(): String =
         auth.currentUser?.uid ?: throw IllegalStateException("Usuário precisa estar autenticado.")
@@ -124,16 +126,25 @@ class ServerRepository(
         pageSize: Long = 50L
     ): Flow<List<ChatMessage>> = flow {
         val path = "servers/$serverId/channels/$channelId/messages"
+        serverClock.ensureSynced(db, userId)
+        val cutoff = serverClock.queryCutoffThreeHoursAgo()
         emitAll(
             db.collection("servers").document(serverId)
                 .collection("channels").document(channelId)
                 .collection("messages")
                 .whereArrayContains("memberUids", userId)
+                .whereGreaterThan("createdAt", cutoff)
                 .orderBy("createdAt", Query.Direction.ASCENDING)
                 .limitToLast(pageSize)
                 .snapshots()
                 .map { snap ->
-                    snap.toObjects(ChatMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    val nowMs = serverClock.nowServerMillis()
+                    snap.documents.mapNotNull { doc ->
+                        val pending = doc.metadata.hasPendingWrites()
+                        val msg = doc.toObject(ChatMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                            ?: return@mapNotNull null
+                        msg.takeIf { !serverClock.isMessageExpired(it, nowMs = nowMs, hasPendingWrites = pending) }
+                    }
                 }
                 .catch { error ->
                     val unwrapped = unwrapFirestoreError(error)
@@ -654,7 +665,8 @@ class ServerRepository(
         replyTo: ChatMessage? = null,
         attachmentUrl: String? = null,
         attachmentName: String? = null,
-        attachmentType: String? = null
+        attachmentType: String? = null,
+        attachmentStoragePath: String? = null
     ): Result<Unit> {
         val uid = auth.currentUser?.uid ?: return Result.failure(IllegalStateException("Não autenticado."))
         val cleanText = text.trim()
@@ -665,6 +677,7 @@ class ServerRepository(
             .collection("channels").document(channelId)
             .collection("messages").document()
         return try {
+            serverClock.ensureSynced(db, uid)
             val firstUrl = linkPreviewFetcher.extractFirstUrl(cleanText)
             val preview = firstUrl?.let { linkPreviewFetcher.fetchMetadata(it) }
 
@@ -679,18 +692,20 @@ class ServerRepository(
                 "readByUids" to listOf(uid),
                 "edited" to false,
                 "deleted" to false,
+                "expiresAt" to serverClock.computeExpiresAt(),
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
             sender.avatarUrl?.takeIf { it.isNotBlank() }?.let { payload["senderAvatarUrl"] = it }
             if (replyTo != null) {
                 payload["replyToMessageId"] = replyTo.id
-                payload["replyToPreview"] = "${replyTo.senderName}: ${replyTo.text}".take(200)
+                payload["replyToPreview"] = "Respondendo a ${replyTo.senderName}".take(200)
             }
             if (!attachmentUrl.isNullOrBlank() && !attachmentType.isNullOrBlank()) {
                 payload["attachmentUrl"] = attachmentUrl.take(500)
                 payload["attachmentType"] = attachmentType
                 attachmentName?.takeIf { it.isNotBlank() }?.let { payload["attachmentName"] = it.take(160) }
+                attachmentStoragePath?.takeIf { it.isNotBlank() }?.let { payload["attachmentStoragePath"] = it.take(500) }
             }
             if (preview != null) {
                 payload["linkUrl"] = preview.url.take(500)
@@ -754,23 +769,41 @@ class ServerRepository(
         }
     }
 
-    suspend fun deleteChannelMessage(serverId: String, channelId: String, messageId: String): Result<Unit> {
-        val path = "servers/$serverId/channels/$channelId/messages/$messageId"
+    suspend fun deleteChannelMessage(serverId: String, channelId: String, message: ChatMessage): Result<Unit> {
+        val path = "servers/$serverId/channels/$channelId/messages/${message.id}"
         return try {
-            requireUserId()
-            db.document(path).update(
-                mapOf(
-                    "text" to "[Mensagem removida]",
-                    "deleted" to true,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
+            val uid = requireUserId()
+            db.document(path).delete().await()
+            if (message.senderUid == uid && (!message.attachmentStoragePath.isNullOrBlank() || !message.attachmentUrl.isNullOrBlank())) {
+                runCatching {
+                    profileRepo?.deleteMedia(message.attachmentStoragePath, message.attachmentUrl)
+                }
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.UPDATE, path)
+            handleFirestoreError(e, OperationType.DELETE, path)
             Result.failure(e)
+        }
+    }
+
+    suspend fun purgeExpiredChannelMessages(serverId: String, channelId: String, expiredMessages: List<ChatMessage>) {
+        if (expiredMessages.isEmpty()) return
+        val uid = auth.currentUser?.uid ?: return
+        for (msg in expiredMessages) {
+            val deleted = runCatching {
+                db.collection("servers").document(serverId)
+                    .collection("channels").document(channelId)
+                    .collection("messages").document(msg.id)
+                    .delete()
+                    .await()
+            }.isSuccess
+            if (deleted && msg.senderUid == uid && (!msg.attachmentStoragePath.isNullOrBlank() || !msg.attachmentUrl.isNullOrBlank())) {
+                runCatching {
+                    profileRepo?.deleteMedia(msg.attachmentStoragePath, msg.attachmentUrl)
+                }
+            }
         }
     }
 }

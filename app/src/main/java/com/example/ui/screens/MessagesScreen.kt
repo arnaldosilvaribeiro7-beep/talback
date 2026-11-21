@@ -61,6 +61,7 @@ import com.example.data.model.UiState
 import com.example.data.model.UserProfile
 import com.example.ui.components.MessageListAndComposer
 import com.example.ui.components.UserAvatar
+import com.example.ui.components.rememberCallPermissionLauncher
 import com.example.ui.theme.LocalTalkbackColors
 import com.example.ui.viewmodel.CallViewModel
 import com.example.ui.viewmodel.SocialChatViewModel
@@ -82,6 +83,7 @@ fun MessagesScreen(
     callViewModel: CallViewModel
 ) {
     val colors = LocalTalkbackColors.current
+    val launchWithCallPermissions = rememberCallPermissionLauncher()
     var searchQuery by remember { mutableStateOf("") }
     var showCreateGroupDialog by remember { mutableStateOf(false) }
     var showEditGroupDialog by remember { mutableStateOf<Conversation?>(null) }
@@ -296,13 +298,15 @@ fun MessagesScreen(
                         IconButton(
                             onClick = {
                                 myProfile?.let { me ->
-                                    callViewModel.startCall(
-                                        caller = me,
-                                        contextType = activeConv.type,
-                                        contextId = activeConv.id,
-                                        callType = "audio",
-                                        participantUids = activeConv.memberUids
-                                    )
+                                    launchWithCallPermissions(false) {
+                                        callViewModel.startCall(
+                                            caller = me,
+                                            contextType = activeConv.type,
+                                            contextId = activeConv.id,
+                                            callType = "audio",
+                                            participantUids = activeConv.memberUids
+                                        )
+                                    }
                                 }
                             },
                             modifier = Modifier.testTag("start_audio_call_button")
@@ -312,13 +316,15 @@ fun MessagesScreen(
                         IconButton(
                             onClick = {
                                 myProfile?.let { me ->
-                                    callViewModel.startCall(
-                                        caller = me,
-                                        contextType = activeConv.type,
-                                        contextId = activeConv.id,
-                                        callType = "video",
-                                        participantUids = activeConv.memberUids
-                                    )
+                                    launchWithCallPermissions(true) {
+                                        callViewModel.startCall(
+                                            caller = me,
+                                            contextType = activeConv.type,
+                                            contextId = activeConv.id,
+                                            callType = "video",
+                                            participantUids = activeConv.memberUids
+                                        )
+                                    }
                                 }
                             },
                             modifier = Modifier.testTag("start_video_call_button")
@@ -348,6 +354,7 @@ fun MessagesScreen(
                             messages = messagesState.data,
                             currentUserId = currentUserId,
                             typingIndicatorText = typingLabel,
+                            canModerateMessages = true,
                             onLoadMore = { socialViewModel.loadMoreMessages() },
                             onSendMessage = { text, reply ->
                                 socialViewModel.sendMessage(activeConv, text, reply)
@@ -365,7 +372,7 @@ fun MessagesScreen(
                                 socialViewModel.editMessage(activeConv.id, msg.id, newText)
                             },
                             onDeleteMessage = { msg ->
-                                socialViewModel.deleteMessage(activeConv.id, msg.id)
+                                socialViewModel.deleteMessage(activeConv.id, msg)
                             },
                             onReportMessage = { msg -> reportTarget = msg }
                         )

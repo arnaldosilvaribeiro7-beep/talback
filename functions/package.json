@@ -1,0 +1,16 @@
+{
+  "name": "talkback-functions",
+  "description": "Cloud Functions for Talkback 3h ephemeral message enforcement, scheduled cleanup, and Firebase Storage orphan purging.",
+  "scripts": {
+    "test": "node --test cleanup.test.js"
+  },
+  "engines": {
+    "node": "20"
+  },
+  "main": "index.js",
+  "dependencies": {
+    "firebase-admin": "^12.7.0",
+    "firebase-functions": "^6.1.1"
+  },
+  "private": true
+}

@@ -18,6 +18,8 @@ const [emulatorHost, emulatorPortStr] = (
 const emulatorPort = parseInt(emulatorPortStr, 10);
 
 const pastDate = (offsetMs = 1000) => new Date(Date.now() - offsetMs);
+const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
+const expiryFrom = (createdDate) => new Date(createdDate.getTime() + THREE_HOURS_MS);
 
 before(async () => {
   const rules = fs.readFileSync("./firestore.rules", "utf8");
@@ -233,18 +235,21 @@ test("Private conversations, messages, reactions, and author-only edits", async 
       readByUids: [ALICE_UID],
       edited: false,
       deleted: false,
+      expiresAt: expiryFrom(now),
       createdAt: now,
       updatedAt: now,
     })
   );
 
-  // Bob can query messages with memberUids filter and add reaction
+  // Bob can query active messages (within 3h server window) with memberUids + createdAt filter and add reaction
   await assertSucceeds(
     bob
       .collection("conversations")
       .doc("conv_1")
       .collection("messages")
       .where("memberUids", "array-contains", BOB_UID)
+      .where("createdAt", ">", new Date(Date.now() - THREE_HOURS_MS + 5000))
+      .orderBy("createdAt", "asc")
       .get()
   );
   await assertSucceeds(
@@ -396,6 +401,7 @@ test("Servers, RBAC permissions, invites, bans, and backend enforcement", async 
   );
 
   // Bob CAN send a message in #geral
+  const m1Time = pastDate(100);
   await assertSucceeds(
     bob
       .collection("servers")
@@ -415,8 +421,9 @@ test("Servers, RBAC permissions, invites, bans, and backend enforcement", async 
         readByUids: [BOB_UID],
         edited: false,
         deleted: false,
-        createdAt: pastDate(100),
-        updatedAt: pastDate(100),
+        expiresAt: expiryFrom(m1Time),
+        createdAt: m1Time,
+        updatedAt: m1Time,
       })
   );
 });
@@ -482,5 +489,309 @@ test("Calls, WebRTC signaling, and terminal state lock", async () => {
       activeUids: [ALICE_UID],
       updatedAt: pastDate(50),
     })
+  );
+});
+
+test("Ephemeral messages: 3h expiry validation, expired query blocking, hard-delete & sync", async () => {
+  const assert = require("node:assert/strict");
+  const alice = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bob = testEnv.authenticatedContext(BOB_UID).firestore();
+  const charlie = testEnv.authenticatedContext(CHARLIE_UID).firestore();
+  const now = pastDate(2000);
+
+  await assertSucceeds(
+    alice.collection("conversations").doc("conv_ephem").set({
+      type: "dm",
+      ownerUid: ALICE_UID,
+      memberUids: [ALICE_UID, BOB_UID],
+      lastMessageText: "",
+      lastMessageAt: now,
+      typingUids: [],
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  // Reject tampered expiresAt (e.g., 24h in future or missing or past)
+  await assertFails(
+    alice.collection("conversations").doc("conv_ephem").collection("messages").doc("msg_bad_long").set({
+      conversationId: "conv_ephem",
+      senderUid: ALICE_UID,
+      senderName: "Alice",
+      memberUids: [ALICE_UID, BOB_UID],
+      text: "Tentativa de 24h",
+      reactions: {},
+      readByUids: [ALICE_UID],
+      edited: false,
+      deleted: false,
+      expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+  await assertFails(
+    alice.collection("conversations").doc("conv_ephem").collection("messages").doc("msg_bad_past").set({
+      conversationId: "conv_ephem",
+      senderUid: ALICE_UID,
+      senderName: "Alice",
+      memberUids: [ALICE_UID, BOB_UID],
+      text: "Ja expirada",
+      reactions: {},
+      readByUids: [ALICE_UID],
+      edited: false,
+      deleted: false,
+      expiresAt: pastDate(100),
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  // Valid message with attachmentStoragePath & exact 3h expiry succeeds
+  await assertSucceeds(
+    alice.collection("conversations").doc("conv_ephem").collection("messages").doc("msg_live").set({
+      conversationId: "conv_ephem",
+      senderUid: ALICE_UID,
+      senderName: "Alice",
+      memberUids: [ALICE_UID, BOB_UID],
+      text: "Mensagem temporaria",
+      attachmentUrl: "https://firebasestorage.googleapis.com/v0/b/test/o/file.jpg",
+      attachmentName: "file.jpg",
+      attachmentType: "image",
+      attachmentStoragePath: `chat_attachments/${ALICE_UID}/file.jpg`,
+      reactions: {},
+      readByUids: [ALICE_UID],
+      edited: false,
+      deleted: false,
+      expiresAt: expiryFrom(now),
+      createdAt: now,
+      updatedAt: now,
+    })
+  );
+
+  // Seed an expired doc (> 3h old) simulating physical TTL/cron lag
+  const expiredCreatedAt = new Date(Date.now() - THREE_HOURS_MS - 30_000);
+  const expiredAt = new Date(Date.now() - 30_000);
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    await context
+      .firestore()
+      .collection("conversations")
+      .doc("conv_ephem")
+      .collection("messages")
+      .doc("msg_expired")
+      .set({
+        conversationId: "conv_ephem",
+        senderUid: ALICE_UID,
+        senderName: "Alice",
+        memberUids: [ALICE_UID, BOB_UID],
+        text: "Mensagem vencida",
+        reactions: {},
+        readByUids: [ALICE_UID],
+        edited: false,
+        deleted: false,
+        expiresAt: expiredAt,
+        createdAt: expiredCreatedAt,
+        updatedAt: expiredCreatedAt,
+      });
+  });
+
+  // Expired message cannot be read directly or updated
+  await assertFails(
+    alice.collection("conversations").doc("conv_ephem").collection("messages").doc("msg_expired").get()
+  );
+  await assertFails(
+    bob.collection("conversations").doc("conv_ephem").collection("messages").doc("msg_expired").get()
+  );
+  await assertFails(
+    bob.collection("conversations").doc("conv_ephem").collection("messages").doc("msg_expired").update({
+      reactions: { "👍": [BOB_UID] },
+      updatedAt: pastDate(100),
+    })
+  );
+
+  // Stale/unfiltered queries seeking expired messages MUST fail with PERMISSION_DENIED
+  await assertFails(
+    bob
+      .collection("conversations")
+      .doc("conv_ephem")
+      .collection("messages")
+      .where("memberUids", "array-contains", BOB_UID)
+      .get()
+  );
+  await assertFails(
+    bob
+      .collection("conversations")
+      .doc("conv_ephem")
+      .collection("messages")
+      .where("memberUids", "array-contains", BOB_UID)
+      .where("createdAt", ">", new Date(Date.now() - 4 * 60 * 60 * 1000))
+      .get()
+  );
+
+  // Active 3h-bounded query succeeds and returns ONLY active messages
+  const activeSnap = await assertSucceeds(
+    bob
+      .collection("conversations")
+      .doc("conv_ephem")
+      .collection("messages")
+      .where("memberUids", "array-contains", BOB_UID)
+      .where("createdAt", ">", new Date(Date.now() - THREE_HOURS_MS + 5000))
+      .orderBy("createdAt", "asc")
+      .get()
+  );
+  assert.equal(activeSnap.docs.length, 1);
+  assert.equal(activeSnap.docs[0].id, "msg_live");
+
+  // Soft-delete tombstone update is forbidden
+  await assertFails(
+    alice.collection("conversations").doc("conv_ephem").collection("messages").doc("msg_live").update({
+      text: "[Mensagem removida]",
+      deleted: true,
+      updatedAt: pastDate(50),
+    })
+  );
+
+  // Non-participant Charlie CANNOT delete Alice/Bob's message
+  await assertFails(
+    charlie.collection("conversations").doc("conv_ephem").collection("messages").doc("msg_live").delete()
+  );
+
+  // Whole conversation CANNOT be accidentally deleted even by owner
+  await assertFails(alice.collection("conversations").doc("conv_ephem").delete());
+
+  // Any participant (Bob, non-author!) CAN hard-delete msg_live immediately and Alice sees deletion
+  await assertSucceeds(
+    bob.collection("conversations").doc("conv_ephem").collection("messages").doc("msg_live").delete()
+  );
+  const afterDeleteSnap = await assertSucceeds(
+    alice
+      .collection("conversations")
+      .doc("conv_ephem")
+      .collection("messages")
+      .where("memberUids", "array-contains", ALICE_UID)
+      .where("createdAt", ">", new Date(Date.now() - THREE_HOURS_MS + 5000))
+      .orderBy("createdAt", "asc")
+      .get()
+  );
+  assert.equal(afterDeleteSnap.docs.length, 0);
+});
+
+test("Server channel ephemeral messages: expired query denial & hard-delete parity", async () => {
+  const assert = require("node:assert/strict");
+  const alice = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bob = testEnv.authenticatedContext(BOB_UID).firestore();
+  const charlie = testEnv.authenticatedContext(CHARLIE_UID).firestore();
+  const now = pastDate(2000);
+
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const adminDb = context.firestore();
+    await adminDb.collection("servers").doc("srv_ephem").set({
+      name: "Srv Ephem",
+      description: "Teste",
+      ownerUid: ALICE_UID,
+      memberUids: [ALICE_UID, BOB_UID, CHARLIE_UID],
+      createdAt: now,
+      updatedAt: now,
+    });
+    await adminDb.collection("servers").doc("srv_ephem").collection("members").doc(BOB_UID).set({
+      userId: BOB_UID,
+      serverId: "srv_ephem",
+      displayName: "Bob",
+      roleId: "member",
+      roleName: "Membro",
+      permissions: ["SEND_MESSAGES", "CONNECT_VOICE"],
+      joinedAt: now,
+      updatedAt: now,
+    });
+    await adminDb.collection("servers").doc("srv_ephem").collection("members").doc(CHARLIE_UID).set({
+      userId: CHARLIE_UID,
+      serverId: "srv_ephem",
+      displayName: "Charlie",
+      roleId: "member",
+      roleName: "Membro",
+      permissions: ["SEND_MESSAGES", "CONNECT_VOICE"],
+      joinedAt: now,
+      updatedAt: now,
+    });
+    await adminDb.collection("servers").doc("srv_ephem").collection("channels").doc("ch_1").set({
+      serverId: "srv_ephem",
+      name: "geral",
+      type: "text",
+      position: 0,
+      memberUids: [ALICE_UID, BOB_UID, CHARLIE_UID],
+      createdAt: now,
+      updatedAt: now,
+    });
+    const expiredCreated = new Date(Date.now() - THREE_HOURS_MS - 60_000);
+    await adminDb
+      .collection("servers")
+      .doc("srv_ephem")
+      .collection("channels")
+      .doc("ch_1")
+      .collection("messages")
+      .doc("old_m")
+      .set({
+        serverId: "srv_ephem",
+        channelId: "ch_1",
+        senderUid: BOB_UID,
+        senderName: "Bob",
+        memberUids: [ALICE_UID, BOB_UID, CHARLIE_UID],
+        text: "Antiga",
+        reactions: {},
+        readByUids: [BOB_UID],
+        edited: false,
+        deleted: false,
+        expiresAt: new Date(Date.now() - 60_000),
+        createdAt: expiredCreated,
+        updatedAt: expiredCreated,
+      });
+  });
+
+  // Expired channel message cannot be read directly or listed via unfiltered query
+  await assertFails(
+    bob.collection("servers").doc("srv_ephem").collection("channels").doc("ch_1").collection("messages").doc("old_m").get()
+  );
+  await assertFails(
+    bob.collection("servers").doc("srv_ephem").collection("channels").doc("ch_1").collection("messages")
+      .where("memberUids", "array-contains", BOB_UID)
+      .get()
+  );
+
+  // Bob sends a live channel message
+  const liveTime = pastDate(500);
+  await assertSucceeds(
+    bob.collection("servers").doc("srv_ephem").collection("channels").doc("ch_1").collection("messages").doc("new_m").set({
+      serverId: "srv_ephem",
+      channelId: "ch_1",
+      senderUid: BOB_UID,
+      senderName: "Bob",
+      memberUids: [ALICE_UID, BOB_UID, CHARLIE_UID],
+      text: "Ao vivo",
+      reactions: {},
+      readByUids: [BOB_UID],
+      edited: false,
+      deleted: false,
+      expiresAt: expiryFrom(liveTime),
+      createdAt: liveTime,
+      updatedAt: liveTime,
+    })
+  );
+
+  // Active 3h-bounded query returns ONLY new_m
+  const chSnap = await assertSucceeds(
+    charlie.collection("servers").doc("srv_ephem").collection("channels").doc("ch_1").collection("messages")
+      .where("memberUids", "array-contains", CHARLIE_UID)
+      .where("createdAt", ">", new Date(Date.now() - THREE_HOURS_MS + 5000))
+      .orderBy("createdAt", "asc")
+      .get()
+  );
+  assert.equal(chSnap.docs.length, 1);
+  assert.equal(chSnap.docs[0].id, "new_m");
+
+  // Charlie (non-author without DELETE_MESSAGES) cannot delete Bob's channel message, while Alice (owner) can hard-delete
+  await assertFails(
+    charlie.collection("servers").doc("srv_ephem").collection("channels").doc("ch_1").collection("messages").doc("new_m").delete()
+  );
+  await assertSucceeds(
+    alice.collection("servers").doc("srv_ephem").collection("channels").doc("ch_1").collection("messages").doc("new_m").delete()
   );
 });

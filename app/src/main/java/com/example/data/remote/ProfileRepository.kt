@@ -5,6 +5,7 @@ import android.net.Uri
 import android.webkit.MimeTypeMap
 import com.example.data.model.PresenceStatus
 import com.example.data.model.PrivateAccount
+import com.example.data.model.UploadedMedia
 import com.example.data.model.UserProfile
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
@@ -14,6 +15,7 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.snapshots
 import com.google.firebase.storage.FirebaseStorage
+import com.google.firebase.storage.StorageException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -25,7 +27,7 @@ import java.util.UUID
 
 class ProfileRepository(
     private val db: FirebaseFirestore,
-    private val storage: FirebaseStorage = FirebaseStorage.getInstance(),
+    private val storage: FirebaseStorage? = runCatching { FirebaseStorage.getInstance() }.getOrNull(),
     private val auth: FirebaseAuth = Firebase.auth
 ) {
     private fun requireUserId(): String =
@@ -232,7 +234,7 @@ class ProfileRepository(
         folder: String,
         maxSizeBytes: Long,
         allowedMimePrefixes: List<String>
-    ): Result<Pair<String, String>> {
+    ): Result<UploadedMedia> {
         return try {
             val uid = requireUserId()
             val resolver = context.contentResolver
@@ -255,10 +257,19 @@ class ProfileRepository(
 
             val ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType) ?: "bin"
             val fileName = "${UUID.randomUUID()}.$ext"
-            val ref = storage.reference.child("$folder/$uid/$fileName")
+            val storagePath = "$folder/$uid/$fileName"
+            val activeStorage = storage ?: runCatching { FirebaseStorage.getInstance() }.getOrNull()
+                ?: return Result.failure(IllegalStateException("Firebase Storage não configurado neste projeto."))
+            val ref = activeStorage.reference.child(storagePath)
             ref.putBytes(bytes).await()
             val downloadUrl = ref.downloadUrl.await().toString()
-            Result.success(downloadUrl to fileName)
+            Result.success(
+                UploadedMedia(
+                    downloadUrl = downloadUrl,
+                    fileName = fileName,
+                    storagePath = storagePath
+                )
+            )
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -267,6 +278,30 @@ class ProfileRepository(
                     "Falha no upload para o Firebase Storage (${e.localizedMessage ?: "verifique a ativação do Storage no Console Firebase"})."
                 )
             )
+        }
+    }
+
+    suspend fun deleteMedia(storagePath: String?, downloadUrl: String? = null): Result<Unit> {
+        val activeStorage = storage ?: runCatching { FirebaseStorage.getInstance() }.getOrNull()
+            ?: return Result.success(Unit)
+        return try {
+            val ref = when {
+                !storagePath.isNullOrBlank() -> activeStorage.reference.child(storagePath)
+                !downloadUrl.isNullOrBlank() -> activeStorage.getReferenceFromUrl(downloadUrl)
+                else -> return Result.success(Unit)
+            }
+            ref.delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: StorageException) {
+            if (e.errorCode == StorageException.ERROR_OBJECT_NOT_FOUND) {
+                Result.success(Unit)
+            } else {
+                Result.failure(e)
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 }

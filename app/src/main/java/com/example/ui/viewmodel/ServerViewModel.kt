@@ -14,10 +14,13 @@ import com.example.data.model.ServerRole
 import com.example.data.model.UiState
 import com.example.data.model.UserProfile
 import com.example.data.remote.ProfileRepository
+import com.example.data.remote.ServerClock
 import com.example.data.remote.ServerRepository
 import com.example.data.remote.unwrapFirestoreError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -27,6 +30,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -36,8 +40,19 @@ import kotlinx.coroutines.launch
 class ServerViewModel(
     private val currentUserId: String,
     private val serverRepo: ServerRepository,
-    private val profileRepo: ProfileRepository
+    private val profileRepo: ProfileRepository,
+    private val serverClock: ServerClock = ServerClock()
 ) : ViewModel() {
+
+    private val purgedChannelMessageIds = mutableSetOf<String>()
+
+    private fun expirationTickerFlow(): Flow<Unit> = flow {
+        emit(Unit)
+        while (true) {
+            delay(5_000L)
+            emit(Unit)
+        }
+    }
 
     private val _toastEvents = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val toastEvents = _toastEvents.asSharedFlow()
@@ -117,8 +132,22 @@ class ServerViewModel(
             if (srvId == null || chId == null) {
                 flowOf(UiState.Success(emptyList()))
             } else {
-                serverRepo.observeChannelMessages(srvId, chId, currentUserId, limit)
-                    .map<List<ChatMessage>, UiState<List<ChatMessage>>> { UiState.Success(it) }
+                combine(
+                    serverRepo.observeChannelMessages(srvId, chId, currentUserId, limit),
+                    expirationTickerFlow()
+                ) { list, _ ->
+                    val nowMs = serverClock.nowServerMillis()
+                    val (expired, active) = list.partition {
+                        serverClock.isMessageExpired(it, nowMs = nowMs)
+                    }
+                    val newlyExpired = expired.filter { purgedChannelMessageIds.add(it.id) }
+                    if (newlyExpired.isNotEmpty()) {
+                        viewModelScope.launch {
+                            serverRepo.purgeExpiredChannelMessages(srvId, chId, newlyExpired)
+                        }
+                    }
+                    UiState.Success(active) as UiState<List<ChatMessage>>
+                }
                     .catch { e ->
                         val root = unwrapFirestoreError(e)
                         emit(UiState.Error(root.message ?: "Erro ao carregar mensagens"))
@@ -292,16 +321,17 @@ class ServerViewModel(
             val maxBytes = if (isImage) 5L * 1024 * 1024 else 10L * 1024 * 1024
             val mimes = if (isImage) listOf("image/") else listOf("*/*")
             profileRepo.uploadMedia(context, uri, "server_attachments", maxBytes, mimes)
-                .onSuccess { (url, fileName) ->
+                .onSuccess { uploaded ->
                     serverRepo.sendChannelMessage(
                         server = server,
                         channelId = channelId,
                         sender = sender,
                         text = caption,
                         replyTo = replyTo,
-                        attachmentUrl = url,
-                        attachmentName = fileName,
-                        attachmentType = if (isImage) "image" else "file"
+                        attachmentUrl = uploaded.downloadUrl,
+                        attachmentName = uploaded.fileName,
+                        attachmentType = if (isImage) "image" else "file",
+                        attachmentStoragePath = uploaded.storagePath
                     )
                 }
                 .onFailure { _toastEvents.tryEmit(it.message ?: "Erro ao enviar anexo") }
@@ -320,9 +350,10 @@ class ServerViewModel(
         }
     }
 
-    fun deleteChannelMessage(serverId: String, channelId: String, messageId: String) {
+    fun deleteChannelMessage(serverId: String, channelId: String, message: ChatMessage) {
         viewModelScope.launch {
-            serverRepo.deleteChannelMessage(serverId, channelId, messageId)
+            serverRepo.deleteChannelMessage(serverId, channelId, message)
+                .onFailure { _toastEvents.tryEmit(it.message ?: "Erro ao excluir mensagem") }
         }
     }
 }

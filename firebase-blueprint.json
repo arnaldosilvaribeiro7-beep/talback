@@ -131,6 +131,7 @@
         "attachmentUrl": { "type": "string" },
         "attachmentName": { "type": "string" },
         "attachmentType": { "type": "string", "enum": ["image", "file"] },
+        "attachmentStoragePath": { "type": "string" },
         "linkUrl": { "type": "string" },
         "linkTitle": { "type": "string" },
         "linkPlatform": { "type": "string" },
@@ -140,10 +141,11 @@
         "readByUids": { "type": "array" },
         "edited": { "type": "boolean" },
         "deleted": { "type": "boolean" },
+        "expiresAt": { "type": "string", "format": "date-time", "description": "Server-validated 3h expiration timestamp" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
       },
-      "required": ["senderUid", "senderName", "memberUids", "text", "reactions", "readByUids", "edited", "deleted", "createdAt", "updatedAt"]
+      "required": ["senderUid", "senderName", "memberUids", "text", "reactions", "readByUids", "edited", "deleted", "expiresAt", "createdAt", "updatedAt"]
     },
     "Server": {
       "title": "Server",

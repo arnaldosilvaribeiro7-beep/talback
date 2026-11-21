@@ -78,6 +78,7 @@ import com.example.data.model.ServerRole
 import com.example.data.model.UiState
 import com.example.data.model.UserProfile
 import com.example.ui.components.MessageListAndComposer
+import com.example.ui.components.rememberCallPermissionLauncher
 import com.example.ui.theme.LocalTalkbackColors
 import com.example.ui.viewmodel.CallViewModel
 import com.example.ui.viewmodel.ServerViewModel
@@ -474,7 +475,7 @@ fun ServersScreen(
                                     serverViewModel.editChannelMessage(activeServer.id, activeChannel.id, msg.id, newText)
                                 },
                                 onDeleteMessage = { msg ->
-                                    serverViewModel.deleteChannelMessage(activeServer.id, activeChannel.id, msg.id)
+                                    serverViewModel.deleteChannelMessage(activeServer.id, activeChannel.id, msg)
                                 },
                                 onReportMessage = { msg -> reportTarget = msg }
                             )
@@ -676,6 +677,7 @@ private fun VoiceChannelView(
     callViewModel: CallViewModel
 ) {
     val colors = LocalTalkbackColors.current
+    val launchWithCallPermissions = rememberCallPermissionLauncher()
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -709,14 +711,16 @@ private fun VoiceChannelView(
                     Button(
                         onClick = {
                             myProfile?.let { me ->
-                                callViewModel.startCall(
-                                    caller = me,
-                                    contextType = "voice_channel",
-                                    contextId = channel.id,
-                                    serverId = server.id,
-                                    callType = "audio",
-                                    participantUids = server.memberUids
-                                )
+                                launchWithCallPermissions(false) {
+                                    callViewModel.startCall(
+                                        caller = me,
+                                        contextType = "voice_channel",
+                                        contextId = channel.id,
+                                        serverId = server.id,
+                                        callType = "audio",
+                                        participantUids = server.memberUids
+                                    )
+                                }
                             }
                         },
                         enabled = canConnect
@@ -728,14 +732,16 @@ private fun VoiceChannelView(
                     OutlinedButton(
                         onClick = {
                             myProfile?.let { me ->
-                                callViewModel.startCall(
-                                    caller = me,
-                                    contextType = "voice_channel",
-                                    contextId = channel.id,
-                                    serverId = server.id,
-                                    callType = "video",
-                                    participantUids = server.memberUids
-                                )
+                                launchWithCallPermissions(true) {
+                                    callViewModel.startCall(
+                                        caller = me,
+                                        contextType = "voice_channel",
+                                        contextId = channel.id,
+                                        serverId = server.id,
+                                        callType = "video",
+                                        participantUids = server.memberUids
+                                    )
+                                }
                             }
                         },
                         enabled = canConnect

@@ -1,15 +1,20 @@
 package com.example
 
+import com.example.data.model.ChatMessage
 import com.example.data.model.Friendship
 import com.example.data.model.PresenceStatus
 import com.example.data.model.ServerMember
 import com.example.data.model.ServerPermission
+import com.example.data.model.UploadedMedia
 import com.example.data.remote.LinkPreviewFetcher
+import com.example.data.remote.ServerClock
+import com.google.firebase.Timestamp
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Date
 
 class ExampleUnitTest {
 
@@ -65,5 +70,72 @@ class ExampleUnitTest {
         assertEquals(PresenceStatus.DND, PresenceStatus.fromWire("dnd"))
         assertEquals(PresenceStatus.IDLE, PresenceStatus.fromWire("idle"))
         assertEquals(PresenceStatus.ONLINE, PresenceStatus.fromWire("unknown_status"))
+    }
+
+    @Test
+    fun `server clock stays monotonic despite device wall clock manipulation`() {
+        var elapsed = 1_000L
+        var wall = 1_700_000_000_000L
+        val clock = ServerClock(
+            elapsedRealtimeProvider = { elapsed },
+            wallClockProvider = { wall }
+        )
+
+        val serverBase = 1_750_000_000_000L
+        clock.calibrate(serverBase)
+
+        // User tampers with device wall clock (+10 hours); server clock must ignore wall clock
+        wall += 10L * 3_600_000L
+        elapsed += 60_000L // +1 real minute
+        assertEquals(serverBase + 60_000L, clock.nowServerMillis())
+
+        val expiresAt = clock.computeExpiresAt()
+        assertEquals(serverBase + 60_000L + ServerClock.MESSAGE_TTL_MILLIS, expiresAt.toDate().time)
+    }
+
+    @Test
+    fun `message expiration triggers at exact 3h boundary and honors pending writes`() {
+        var elapsed = 0L
+        val clock = ServerClock(
+            elapsedRealtimeProvider = { elapsed },
+            wallClockProvider = { 0L }
+        )
+        val t0 = 1_750_000_000_000L
+        clock.calibrate(t0)
+
+        val msg = ChatMessage(
+            id = "m1",
+            senderUid = "u1",
+            senderName = "Ana",
+            text = "Oi",
+            expiresAt = Timestamp(Date(t0 + ServerClock.MESSAGE_TTL_MILLIS)),
+            createdAt = Timestamp(Date(t0))
+        )
+
+        elapsed = ServerClock.MESSAGE_TTL_MILLIS - 1L
+        assertFalse(clock.isMessageExpired(msg))
+
+        elapsed = ServerClock.MESSAGE_TTL_MILLIS
+        assertTrue(clock.isMessageExpired(msg))
+        assertTrue(clock.isTimestampExpired(msg.createdAt))
+
+        // Pending local write with old estimated createdAt does not falsely expire if expiresAt is still future
+        val pendingMsg = ChatMessage(
+            id = "m_pending",
+            senderUid = "u1",
+            senderName = "Ana",
+            text = "Agora",
+            expiresAt = Timestamp(Date(t0 + ServerClock.MESSAGE_TTL_MILLIS + 60_000L)),
+            createdAt = Timestamp(Date(t0 - 1_000_000L))
+        )
+        elapsed = 0L
+        assertFalse(clock.isMessageExpired(pendingMsg, hasPendingWrites = true))
+
+        val uploaded = UploadedMedia(
+            downloadUrl = "https://firebasestorage.googleapis.com/v0/b/x/o/file",
+            fileName = "foto.jpg",
+            storagePath = "chat_attachments/u1/foto.jpg"
+        )
+        assertEquals("chat_attachments/u1/foto.jpg", uploaded.storagePath)
     }
 }

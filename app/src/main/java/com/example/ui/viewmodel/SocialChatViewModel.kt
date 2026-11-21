@@ -15,12 +15,14 @@ import com.example.data.model.UiState
 import com.example.data.model.UserProfile
 import com.example.data.remote.ChatRepository
 import com.example.data.remote.ProfileRepository
+import com.example.data.remote.ServerClock
 import com.example.data.remote.SocialRepository
 import com.example.data.remote.unwrapFirestoreError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -28,7 +30,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -39,8 +43,19 @@ class SocialChatViewModel(
     private val currentUserId: String,
     private val profileRepo: ProfileRepository,
     private val socialRepo: SocialRepository,
-    private val chatRepo: ChatRepository
+    private val chatRepo: ChatRepository,
+    private val serverClock: ServerClock = ServerClock()
 ) : ViewModel() {
+
+    private val purgedMessageIds = mutableSetOf<String>()
+
+    private fun expirationTickerFlow(): Flow<Unit> = flow {
+        emit(Unit)
+        while (true) {
+            delay(5_000L)
+            emit(Unit)
+        }
+    }
 
     private val _toastEvents = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val toastEvents = _toastEvents.asSharedFlow()
@@ -77,8 +92,23 @@ class SocialChatViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
-    val conversations: StateFlow<UiState<List<Conversation>>> = chatRepo.observeConversations(currentUserId)
-        .map<List<Conversation>, UiState<List<Conversation>>> { UiState.Success(it) }
+    val conversations: StateFlow<UiState<List<Conversation>>> = combine(
+        chatRepo.observeConversations(currentUserId),
+        expirationTickerFlow()
+    ) { list, _ ->
+        val nowMs = serverClock.nowServerMillis()
+        val scrubbed = list.map { conv ->
+            if (conv.lastMessageText.isNotBlank() &&
+                conv.lastMessageAt != null &&
+                serverClock.isTimestampExpired(conv.lastMessageAt, nowMs = nowMs)
+            ) {
+                conv.copy(lastMessageText = "", lastMessageSenderUid = null)
+            } else {
+                conv
+            }
+        }
+        UiState.Success(scrubbed) as UiState<List<Conversation>>
+    }
         .catch { e ->
             val root = unwrapFirestoreError(e)
             emit(UiState.Error(root.message ?: "Erro ao carregar conversas"))
@@ -96,11 +126,23 @@ class SocialChatViewModel(
                 flowOf(UiState.Success(emptyList()))
             } else {
                 _messagePageSize.flatMapLatest { limit ->
-                    chatRepo.observeMessages(convId, currentUserId, limit)
-                        .map<List<ChatMessage>, UiState<List<ChatMessage>>> { list ->
-                            viewModelScope.launch { chatRepo.markConversationRead(convId, list) }
-                            UiState.Success(list)
+                    combine(
+                        chatRepo.observeMessages(convId, currentUserId, limit),
+                        expirationTickerFlow()
+                    ) { list, _ ->
+                        val nowMs = serverClock.nowServerMillis()
+                        val (expired, active) = list.partition {
+                            serverClock.isMessageExpired(it, nowMs = nowMs)
                         }
+                        val newlyExpired = expired.filter { purgedMessageIds.add(it.id) }
+                        if (newlyExpired.isNotEmpty()) {
+                            viewModelScope.launch { chatRepo.purgeExpiredMessages(convId, newlyExpired) }
+                        }
+                        if (active.isNotEmpty()) {
+                            viewModelScope.launch { chatRepo.markConversationRead(convId, active) }
+                        }
+                        UiState.Success(active) as UiState<List<ChatMessage>>
+                    }
                         .catch { e ->
                             val root = unwrapFirestoreError(e)
                             emit(UiState.Error(root.message ?: "Erro ao carregar mensagens"))
@@ -219,7 +261,8 @@ class SocialChatViewModel(
         replyTo: ChatMessage? = null,
         attachmentUrl: String? = null,
         attachmentName: String? = null,
-        attachmentType: String? = null
+        attachmentType: String? = null,
+        attachmentStoragePath: String? = null
     ) {
         val profile = (myProfile.value as? UiState.Success)?.data ?: return
         viewModelScope.launch {
@@ -231,7 +274,8 @@ class SocialChatViewModel(
                 replyTo = replyTo,
                 attachmentUrl = attachmentUrl,
                 attachmentName = attachmentName,
-                attachmentType = attachmentType
+                attachmentType = attachmentType,
+                attachmentStoragePath = attachmentStoragePath
             ).onFailure { _toastEvents.tryEmit(it.message ?: "Erro ao enviar mensagem") }
         }
     }
@@ -248,14 +292,15 @@ class SocialChatViewModel(
             val maxBytes = if (isImage) 5L * 1024 * 1024 else 10L * 1024 * 1024
             val mimes = if (isImage) listOf("image/") else listOf("*/*")
             profileRepo.uploadMedia(context, uri, "chat_attachments", maxBytes, mimes)
-                .onSuccess { (url, fileName) ->
+                .onSuccess { uploaded ->
                     sendMessage(
                         conversation = conversation,
                         text = caption,
                         replyTo = replyTo,
-                        attachmentUrl = url,
-                        attachmentName = fileName,
-                        attachmentType = if (isImage) "image" else "file"
+                        attachmentUrl = uploaded.downloadUrl,
+                        attachmentName = uploaded.fileName,
+                        attachmentType = if (isImage) "image" else "file",
+                        attachmentStoragePath = uploaded.storagePath
                     )
                 }
                 .onFailure { _toastEvents.tryEmit(it.message ?: "Erro ao enviar anexo") }
@@ -287,9 +332,9 @@ class SocialChatViewModel(
         }
     }
 
-    fun deleteMessage(conversationId: String, messageId: String) {
+    fun deleteMessage(conversationId: String, message: ChatMessage) {
         viewModelScope.launch {
-            chatRepo.deleteMessage(conversationId, messageId)
+            chatRepo.deleteMessage(conversationId, message)
                 .onFailure { _toastEvents.tryEmit(it.message ?: "Erro ao excluir") }
         }
     }
@@ -349,9 +394,9 @@ class SocialChatViewModel(
                 else -> Triple("banner_videos", 15L, listOf("video/"))
             }
             profileRepo.uploadMedia(context, uri, folder, maxMb * 1024 * 1024, mimes)
-                .onSuccess { (url, _) ->
+                .onSuccess { uploaded ->
                     _toastEvents.tryEmit("Mídia carregada! Salve o perfil para aplicar.")
-                    onUploaded(url)
+                    onUploaded(uploaded.downloadUrl)
                 }
                 .onFailure { _toastEvents.tryEmit(it.message ?: "Falha no upload") }
         }

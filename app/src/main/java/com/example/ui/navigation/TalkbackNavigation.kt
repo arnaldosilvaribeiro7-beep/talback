@@ -76,6 +76,7 @@ import com.example.data.remote.AuthRepository
 import com.example.data.remote.CallRepository
 import com.example.data.remote.ChatRepository
 import com.example.data.remote.ProfileRepository
+import com.example.data.remote.ServerClock
 import com.example.data.remote.ServerRepository
 import com.example.data.remote.SocialRepository
 import com.example.ui.screens.ActiveCallOverlay
@@ -122,7 +123,8 @@ fun TalkbackMainShell(
     chatRepo: ChatRepository,
     serverRepo: ServerRepository,
     callRepo: CallRepository,
-    prefsRepo: AppPreferencesRepository
+    prefsRepo: AppPreferencesRepository,
+    serverClock: ServerClock = ServerClock()
 ) {
     val context = LocalContext.current
     val appContext = context.applicationContext
@@ -135,7 +137,7 @@ fun TalkbackMainShell(
         factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                SocialChatViewModel(currentUserId, profileRepo, socialRepo, chatRepo) as T
+                SocialChatViewModel(currentUserId, profileRepo, socialRepo, chatRepo, serverClock) as T
         }
     )
 
@@ -144,7 +146,7 @@ fun TalkbackMainShell(
         factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                ServerViewModel(currentUserId, serverRepo, profileRepo) as T
+                ServerViewModel(currentUserId, serverRepo, profileRepo, serverClock) as T
         }
     )
 

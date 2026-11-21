@@ -56,6 +56,7 @@ import com.example.data.model.PrivateAccount
 import com.example.data.model.UiState
 import com.example.data.model.UserProfile
 import com.example.ui.components.UserAvatar
+import com.example.ui.components.rememberCallPermissionLauncher
 import com.example.ui.theme.LocalTalkbackColors
 import com.example.ui.viewmodel.CallViewModel
 import com.example.ui.viewmodel.SocialChatViewModel
@@ -74,6 +75,7 @@ fun FriendsScreen(
     onOpenConversation: (String) -> Unit
 ) {
     val colors = LocalTalkbackColors.current
+    val launchWithCallPermissions = rememberCallPermissionLauncher()
     var selectedTab by remember { mutableIntStateOf(0) }
     var usernameInput by remember { mutableStateOf("") }
 
@@ -214,26 +216,30 @@ fun FriendsScreen(
                                             }
                                             IconButton(onClick = {
                                                 myProfile?.let { me ->
-                                                    callViewModel.startCall(
-                                                        caller = me,
-                                                        contextType = "dm",
-                                                        contextId = "dm_${listOf(currentUserId, peerUid).sorted().joinToString("_")}",
-                                                        callType = "audio",
-                                                        participantUids = listOf(currentUserId, peerUid)
-                                                    )
+                                                    launchWithCallPermissions(false) {
+                                                        callViewModel.startCall(
+                                                            caller = me,
+                                                            contextType = "dm",
+                                                            contextId = "dm_${listOf(currentUserId, peerUid).sorted().joinToString("_")}",
+                                                            callType = "audio",
+                                                            participantUids = listOf(currentUserId, peerUid)
+                                                        )
+                                                    }
                                                 }
                                             }) {
                                                 Icon(Icons.Default.Call, contentDescription = "Ligar")
                                             }
                                             IconButton(onClick = {
                                                 myProfile?.let { me ->
-                                                    callViewModel.startCall(
-                                                        caller = me,
-                                                        contextType = "dm",
-                                                        contextId = "dm_${listOf(currentUserId, peerUid).sorted().joinToString("_")}",
-                                                        callType = "video",
-                                                        participantUids = listOf(currentUserId, peerUid)
-                                                    )
+                                                    launchWithCallPermissions(true) {
+                                                        callViewModel.startCall(
+                                                            caller = me,
+                                                            contextType = "dm",
+                                                            contextId = "dm_${listOf(currentUserId, peerUid).sorted().joinToString("_")}",
+                                                            callType = "video",
+                                                            participantUids = listOf(currentUserId, peerUid)
+                                                        )
+                                                    }
                                                 }
                                             }) {
                                                 Icon(Icons.Default.Videocam, contentDescription = "Vídeo")

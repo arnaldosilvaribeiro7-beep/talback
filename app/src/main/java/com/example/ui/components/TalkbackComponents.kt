@@ -1,11 +1,14 @@
 package com.example.ui.components
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.view.ViewGroup
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -96,6 +99,39 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 
 private val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "😮", "😢", "🔥")
+
+@Composable
+fun rememberCallPermissionLauncher(): (needCamera: Boolean, onGranted: () -> Unit) -> Unit {
+    val context = LocalContext.current
+    var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val launcher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        if (results[Manifest.permission.RECORD_AUDIO] == true) {
+            pendingAction?.invoke()
+        }
+        pendingAction = null
+    }
+    return remember(context, launcher) {
+        { needCamera, onGranted ->
+            val hasAudio = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
+            val hasCam = !needCamera || ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                PackageManager.PERMISSION_GRANTED
+            if (hasAudio && hasCam) {
+                onGranted()
+            } else {
+                pendingAction = onGranted
+                val perms = if (needCamera) {
+                    arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA)
+                } else {
+                    arrayOf(Manifest.permission.RECORD_AUDIO)
+                }
+                launcher.launch(perms)
+            }
+        }
+    }
+}
 
 @Composable
 fun UserAvatar(
@@ -422,6 +458,13 @@ fun MessageListAndComposer(
                         .padding(vertical = 6.dp, horizontal = 6.dp)
                 ) {
                     if (!msg.replyToPreview.isNullOrBlank()) {
+                        val replyTargetExists = msg.replyToMessageId == null ||
+                            messages.any { it.id == msg.replyToMessageId }
+                        val replyLabel = if (replyTargetExists) {
+                            msg.replyToPreview
+                        } else {
+                            "Respondendo a mensagem expirada ou removida"
+                        }
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
@@ -438,7 +481,7 @@ fun MessageListAndComposer(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = msg.replyToPreview,
+                                text = replyLabel,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = colors.textSecondary,
                                 maxLines = 1,

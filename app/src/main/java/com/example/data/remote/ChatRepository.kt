@@ -22,7 +22,9 @@ import kotlinx.coroutines.tasks.await
 class ChatRepository(
     private val db: FirebaseFirestore,
     private val linkPreviewFetcher: LinkPreviewFetcher = LinkPreviewFetcher(),
-    private val auth: FirebaseAuth = Firebase.auth
+    private val auth: FirebaseAuth = Firebase.auth,
+    private val serverClock: ServerClock = ServerClock(),
+    private val profileRepo: ProfileRepository? = null
 ) {
     private fun requireUserId(): String =
         auth.currentUser?.uid
@@ -50,15 +52,24 @@ class ChatRepository(
 
     fun observeMessages(conversationId: String, userId: String, pageSize: Long = 50L): Flow<List<ChatMessage>> = flow {
         val path = "conversations/$conversationId/messages"
+        serverClock.ensureSynced(db, userId)
+        val cutoff = serverClock.queryCutoffThreeHoursAgo()
         emitAll(
             db.collection("conversations").document(conversationId)
                 .collection("messages")
                 .whereArrayContains("memberUids", userId)
+                .whereGreaterThan("createdAt", cutoff)
                 .orderBy("createdAt", Query.Direction.ASCENDING)
                 .limitToLast(pageSize)
                 .snapshots()
                 .map { snap ->
-                    snap.toObjects(ChatMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    val nowMs = serverClock.nowServerMillis()
+                    snap.documents.mapNotNull { doc ->
+                        val pending = doc.metadata.hasPendingWrites()
+                        val msg = doc.toObject(ChatMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                            ?: return@mapNotNull null
+                        msg.takeIf { !serverClock.isMessageExpired(it, nowMs = nowMs, hasPendingWrites = pending) }
+                    }
                 }
                 .catch { error ->
                     val unwrapped = unwrapFirestoreError(error)
@@ -162,7 +173,8 @@ class ChatRepository(
         replyTo: ChatMessage? = null,
         attachmentUrl: String? = null,
         attachmentName: String? = null,
-        attachmentType: String? = null
+        attachmentType: String? = null,
+        attachmentStoragePath: String? = null
     ): Result<Unit> {
         val uid = auth.currentUser?.uid ?: return Result.failure(IllegalStateException("Não autenticado."))
         val cleanText = text.trim()
@@ -172,6 +184,7 @@ class ChatRepository(
         val msgRef = db.collection("conversations").document(conversation.id)
             .collection("messages").document()
         return try {
+            serverClock.ensureSynced(db, uid)
             val firstUrl = linkPreviewFetcher.extractFirstUrl(cleanText)
             val preview = firstUrl?.let { linkPreviewFetcher.fetchMetadata(it) }
 
@@ -185,18 +198,20 @@ class ChatRepository(
                 "readByUids" to listOf(uid),
                 "edited" to false,
                 "deleted" to false,
+                "expiresAt" to serverClock.computeExpiresAt(),
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
             sender.avatarUrl?.takeIf { it.isNotBlank() }?.let { payload["senderAvatarUrl"] = it }
             if (replyTo != null) {
                 payload["replyToMessageId"] = replyTo.id
-                payload["replyToPreview"] = "${replyTo.senderName}: ${replyTo.text}".take(200)
+                payload["replyToPreview"] = "Respondendo a ${replyTo.senderName}".take(200)
             }
             if (!attachmentUrl.isNullOrBlank() && !attachmentType.isNullOrBlank()) {
                 payload["attachmentUrl"] = attachmentUrl.take(500)
                 payload["attachmentType"] = attachmentType
                 attachmentName?.takeIf { it.isNotBlank() }?.let { payload["attachmentName"] = it.take(160) }
+                attachmentStoragePath?.takeIf { it.isNotBlank() }?.let { payload["attachmentStoragePath"] = it.take(500) }
             }
             if (preview != null) {
                 payload["linkUrl"] = preview.url.take(500)
@@ -255,23 +270,91 @@ class ChatRepository(
         }
     }
 
-    suspend fun deleteMessage(conversationId: String, messageId: String): Result<Unit> {
-        val path = "conversations/$conversationId/messages/$messageId"
+    suspend fun deleteMessage(conversationId: String, message: ChatMessage): Result<Unit> {
+        val path = "conversations/$conversationId/messages/${message.id}"
         return try {
-            requireUserId()
-            db.document(path).update(
-                mapOf(
-                    "text" to "[Mensagem removida]",
-                    "deleted" to true,
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            ).await()
+            val uid = requireUserId()
+            db.document(path).delete().await()
+            if (message.senderUid == uid && (!message.attachmentStoragePath.isNullOrBlank() || !message.attachmentUrl.isNullOrBlank())) {
+                runCatching {
+                    profileRepo?.deleteMedia(message.attachmentStoragePath, message.attachmentUrl)
+                }
+            }
+            runCatching { refreshConversationLastMessage(conversationId, uid) }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.UPDATE, path)
+            handleFirestoreError(e, OperationType.DELETE, path)
             Result.failure(e)
+        }
+    }
+
+    suspend fun purgeExpiredMessages(conversationId: String, expiredMessages: List<ChatMessage>) {
+        if (expiredMessages.isEmpty()) return
+        val uid = auth.currentUser?.uid ?: return
+        var deletedAny = false
+        for (msg in expiredMessages) {
+            val deleted = runCatching {
+                db.collection("conversations").document(conversationId)
+                    .collection("messages").document(msg.id)
+                    .delete()
+                    .await()
+            }.isSuccess
+            if (deleted) {
+                deletedAny = true
+                if (msg.senderUid == uid && (!msg.attachmentStoragePath.isNullOrBlank() || !msg.attachmentUrl.isNullOrBlank())) {
+                    runCatching {
+                        profileRepo?.deleteMedia(msg.attachmentStoragePath, msg.attachmentUrl)
+                    }
+                }
+            }
+        }
+        if (deletedAny) {
+            runCatching { refreshConversationLastMessage(conversationId, uid) }
+        }
+    }
+
+    private suspend fun refreshConversationLastMessage(conversationId: String, userId: String) {
+        serverClock.ensureSynced(db, userId)
+        val cutoff = serverClock.queryCutoffThreeHoursAgo()
+        val snap = db.collection("conversations").document(conversationId)
+            .collection("messages")
+            .whereArrayContains("memberUids", userId)
+            .whereGreaterThan("createdAt", cutoff)
+            .orderBy("createdAt", Query.Direction.DESCENDING)
+            .limit(5)
+            .get()
+            .await()
+
+        val nowMs = serverClock.nowServerMillis()
+        val latest = snap.toObjects(ChatMessage::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+            .firstOrNull { !serverClock.isMessageExpired(it, nowMs = nowMs) }
+
+        val convRef = db.collection("conversations").document(conversationId)
+        if (latest == null) {
+            convRef.update(
+                mapOf(
+                    "lastMessageText" to "",
+                    "lastMessageSenderUid" to FieldValue.delete(),
+                    "lastMessageAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+        } else {
+            val summary = when {
+                latest.text.isNotBlank() -> latest.text.take(120)
+                latest.attachmentType == "image" -> "📷 Imagem"
+                else -> "📎 Arquivo"
+            }
+            convRef.update(
+                mapOf(
+                    "lastMessageText" to summary,
+                    "lastMessageSenderUid" to latest.senderUid,
+                    "lastMessageAt" to (latest.createdAt ?: FieldValue.serverTimestamp()),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
         }
     }
 

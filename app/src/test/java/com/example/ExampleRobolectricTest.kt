@@ -5,9 +5,11 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.test.core.app.ApplicationProvider
+import com.example.data.model.ChatMessage
 import com.example.data.model.ThemeMode
 import com.example.data.model.UserProfile
 import com.example.data.preferences.AppPreferencesRepository
+import com.example.ui.components.MessageListAndComposer
 import com.example.ui.components.ProfileHeaderCard
 import com.example.ui.theme.TalkbackTheme
 import kotlinx.coroutines.flow.first
@@ -73,7 +75,42 @@ class ExampleRobolectricTest {
     @Test
     fun `main activity launches without crashing`() {
         val controller = org.robolectric.Robolectric.buildActivity(MainActivity::class.java).setup()
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
         val activity = controller.get()
         assertTrue(!activity.isFinishing)
+        controller.pause().stop().destroy()
+    }
+
+    @Test
+    fun `message list replaces reply preview when target message is removed or expired`() {
+        val replyMsg = ChatMessage(
+            id = "m_reply",
+            senderUid = "u2",
+            senderName = "Bruno",
+            text = "Entendi!",
+            replyToMessageId = "m_deleted",
+            replyToPreview = "Respondendo a Ana"
+        )
+        composeTestRule.setContent {
+            TalkbackTheme(themeMode = ThemeMode.DARK) {
+                MessageListAndComposer(
+                    messages = listOf(replyMsg),
+                    currentUserId = "u1",
+                    typingIndicatorText = null,
+                    canModerateMessages = true,
+                    onLoadMore = {},
+                    onSendMessage = { _, _ -> },
+                    onAttachMedia = { _, _, _, _ -> },
+                    onTypingChanged = {},
+                    onToggleReaction = { _, _ -> },
+                    onEditMessage = { _, _ -> },
+                    onDeleteMessage = {},
+                    onReportMessage = {}
+                )
+            }
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("Respondendo a mensagem expirada ou removida").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Entendi!").assertIsDisplayed()
     }
 }

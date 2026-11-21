@@ -151,6 +151,20 @@ service cloud.firestore {
              isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt);
     }
 
+    function isValidMessageExpiry(data) {
+      return data.expiresAt is timestamp &&
+             data.expiresAt > request.time &&
+             data.expiresAt >= data.createdAt + duration.value(2, 'h') + duration.value(58, 'm') &&
+             data.expiresAt <= data.createdAt + duration.value(3, 'h') + duration.value(2, 'm');
+    }
+
+    function isMessageActive(data) {
+      return data.createdAt is timestamp &&
+             data.expiresAt is timestamp &&
+             data.expiresAt > request.time &&
+             (data.createdAt + duration.value(3, 'h')) > request.time;
+    }
+
     function isValidChatMessage(data) {
       return isOptionalString(data, 'conversationId', 128) &&
              isOptionalString(data, 'serverId', 128) &&
@@ -165,6 +179,7 @@ service cloud.firestore {
              isOptionalString(data, 'attachmentUrl', 500) &&
              isOptionalString(data, 'attachmentName', 160) &&
              (!('attachmentType' in data) || data.attachmentType in ['image', 'file']) &&
+             isOptionalString(data, 'attachmentStoragePath', 500) &&
              isOptionalString(data, 'linkUrl', 500) &&
              isOptionalString(data, 'linkTitle', 200) &&
              isOptionalString(data, 'linkPlatform', 80) &&
@@ -173,8 +188,9 @@ service cloud.firestore {
              data.reactions is map && data.reactions.size() <= 25 &&
              isBoundedStringList(data.readByUids, 50) &&
              data.edited is bool &&
-             data.deleted is bool &&
-             isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt);
+             data.deleted == false &&
+             isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt) &&
+             isValidMessageExpiry(data);
     }
 
     function isValidServer(data) {
@@ -409,17 +425,24 @@ service cloud.firestore {
                          // Action 3: Group settings / member management (owner or group member)
                          (existing().type == 'group' && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'iconUrl', 'memberUids', 'updatedAt']))
                        );
-      allow delete: if isSignedIn() && isValidId(conversationId) && existing().ownerUid == request.auth.uid;
+      // Prevent accidental client deletion of entire conversations; only messages are deleted
+      allow delete: if false;
 
       match /messages/{messageId} {
-        allow get: if isSignedIn() && isValidId(conversationId) && isValidId(messageId) && request.auth.uid in existing().memberUids;
-        allow list: if isSignedIn() && request.auth.uid in resource.data.memberUids;
+        allow get: if isSignedIn() &&
+                      isValidId(conversationId) &&
+                      isValidId(messageId) &&
+                      request.auth.uid in existing().memberUids &&
+                      isMessageActive(existing());
+        allow list: if isSignedIn() &&
+                       request.auth.uid in resource.data.memberUids &&
+                       resource.data.createdAt > request.time - duration.value(3, 'h');
         allow create: if isSignedIn() &&
                          isValidId(conversationId) && isValidId(messageId) &&
                          incoming().senderUid == request.auth.uid &&
                          incoming().conversationId == conversationId &&
-                         incoming().keys().hasAll(['conversationId', 'senderUid', 'senderName', 'memberUids', 'text', 'reactions', 'readByUids', 'edited', 'deleted', 'createdAt', 'updatedAt']) &&
-                         incoming().keys().hasOnly(['conversationId', 'senderUid', 'senderName', 'senderAvatarUrl', 'memberUids', 'text', 'replyToMessageId', 'replyToPreview', 'attachmentUrl', 'attachmentName', 'attachmentType', 'linkUrl', 'linkTitle', 'linkPlatform', 'linkDescription', 'linkThumbnailUrl', 'reactions', 'readByUids', 'edited', 'deleted', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasAll(['conversationId', 'senderUid', 'senderName', 'memberUids', 'text', 'reactions', 'readByUids', 'edited', 'deleted', 'expiresAt', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['conversationId', 'senderUid', 'senderName', 'senderAvatarUrl', 'memberUids', 'text', 'replyToMessageId', 'replyToPreview', 'attachmentUrl', 'attachmentName', 'attachmentType', 'attachmentStoragePath', 'linkUrl', 'linkTitle', 'linkPlatform', 'linkDescription', 'linkThumbnailUrl', 'reactions', 'readByUids', 'edited', 'deleted', 'expiresAt', 'createdAt', 'updatedAt']) &&
                          isValidChatMessage(incoming()) &&
                          exists(/databases/$(database)/documents/conversations/$(conversationId)) &&
                          request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.memberUids &&
@@ -427,17 +450,26 @@ service cloud.firestore {
         allow update: if isSignedIn() &&
                          isValidId(conversationId) && isValidId(messageId) &&
                          request.auth.uid in existing().memberUids &&
+                         isMessageActive(existing()) &&
                          incoming().senderUid == existing().senderUid &&
                          incoming().createdAt == existing().createdAt &&
+                         incoming().expiresAt == existing().expiresAt &&
                          isValidChatMessage(incoming()) && (
-                           // Action 1: Author edits or soft-deletes own message
-                           (existing().senderUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['text', 'edited', 'deleted', 'updatedAt'])) ||
+                           // Action 1: Author edits own message (deletion must use hard-delete)
+                           (existing().senderUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['text', 'edited', 'updatedAt'])) ||
                            // Action 2: Participant toggles emoji reaction
                            incoming().diff(existing()).affectedKeys().hasOnly(['reactions', 'updatedAt']) ||
                            // Action 3: Participant marks message as read
                            incoming().diff(existing()).affectedKeys().hasOnly(['readByUids', 'updatedAt'])
                          );
-        allow delete: if isSignedIn() && isValidId(conversationId) && isValidId(messageId) && existing().senderUid == request.auth.uid;
+        // Any participant of the conversation can hard-delete a message immediately
+        allow delete: if isSignedIn() &&
+                         isValidId(conversationId) &&
+                         isValidId(messageId) && (
+                           request.auth.uid in existing().memberUids ||
+                           (exists(/databases/$(database)/documents/conversations/$(conversationId)) &&
+                            request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.memberUids)
+                         );
       }
     }
 
@@ -552,26 +584,34 @@ service cloud.firestore {
         allow delete: if isSignedIn() && isValidId(serverId) && isValidId(channelId) && hasServerPermission(serverId, 'MANAGE_CHANNELS');
 
         match /messages/{messageId} {
-          allow get: if isSignedIn() && isValidId(serverId) && isValidId(channelId) && isValidId(messageId) && request.auth.uid in existing().memberUids;
-          allow list: if isSignedIn() && request.auth.uid in resource.data.memberUids;
+          allow get: if isSignedIn() &&
+                        isValidId(serverId) &&
+                        isValidId(channelId) &&
+                        isValidId(messageId) &&
+                        request.auth.uid in existing().memberUids &&
+                        isMessageActive(existing());
+          allow list: if isSignedIn() &&
+                         request.auth.uid in resource.data.memberUids &&
+                         resource.data.createdAt > request.time - duration.value(3, 'h');
           allow create: if isSignedIn() &&
                            isValidId(serverId) && isValidId(channelId) && isValidId(messageId) &&
                            incoming().senderUid == request.auth.uid &&
                            incoming().serverId == serverId &&
                            incoming().channelId == channelId &&
-                           incoming().keys().hasAll(['serverId', 'channelId', 'senderUid', 'senderName', 'memberUids', 'text', 'reactions', 'readByUids', 'edited', 'deleted', 'createdAt', 'updatedAt']) &&
-                           incoming().keys().hasOnly(['serverId', 'channelId', 'senderUid', 'senderName', 'senderAvatarUrl', 'memberUids', 'text', 'replyToMessageId', 'replyToPreview', 'attachmentUrl', 'attachmentName', 'attachmentType', 'linkUrl', 'linkTitle', 'linkPlatform', 'linkDescription', 'linkThumbnailUrl', 'reactions', 'readByUids', 'edited', 'deleted', 'createdAt', 'updatedAt']) &&
+                           incoming().keys().hasAll(['serverId', 'channelId', 'senderUid', 'senderName', 'memberUids', 'text', 'reactions', 'readByUids', 'edited', 'deleted', 'expiresAt', 'createdAt', 'updatedAt']) &&
+                           incoming().keys().hasOnly(['serverId', 'channelId', 'senderUid', 'senderName', 'senderAvatarUrl', 'memberUids', 'text', 'replyToMessageId', 'replyToPreview', 'attachmentUrl', 'attachmentName', 'attachmentType', 'attachmentStoragePath', 'linkUrl', 'linkTitle', 'linkPlatform', 'linkDescription', 'linkThumbnailUrl', 'reactions', 'readByUids', 'edited', 'deleted', 'expiresAt', 'createdAt', 'updatedAt']) &&
                            isValidChatMessage(incoming()) &&
                            hasServerPermission(serverId, 'SEND_MESSAGES') &&
                            incoming().memberUids == serverDoc(serverId).memberUids;
           allow update: if isSignedIn() &&
                            isValidId(serverId) && isValidId(channelId) && isValidId(messageId) &&
                            request.auth.uid in existing().memberUids &&
+                           isMessageActive(existing()) &&
                            incoming().senderUid == existing().senderUid &&
                            incoming().createdAt == existing().createdAt &&
+                           incoming().expiresAt == existing().expiresAt &&
                            isValidChatMessage(incoming()) && (
-                             (existing().senderUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['text', 'edited', 'deleted', 'updatedAt'])) ||
-                             (hasServerPermission(serverId, 'DELETE_MESSAGES') && incoming().diff(existing()).affectedKeys().hasOnly(['text', 'deleted', 'updatedAt'])) ||
+                             (existing().senderUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['text', 'edited', 'updatedAt'])) ||
                              incoming().diff(existing()).affectedKeys().hasOnly(['reactions', 'updatedAt']) ||
                              incoming().diff(existing()).affectedKeys().hasOnly(['readByUids', 'updatedAt'])
                            );
