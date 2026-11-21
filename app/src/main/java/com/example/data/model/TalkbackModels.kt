@@ -111,6 +111,7 @@ data class FriendRequest(
     val toAvatarUrl: String? = null,
     val status: String = "pending",
     val participantUids: List<String> = emptyList(),
+    val expiresAt: Timestamp? = null,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
@@ -275,6 +276,7 @@ data class ModerationLog(
     val targetUid: String? = null,
     val details: String = "",
     val memberUids: List<String> = emptyList(),
+    val expiresAt: Timestamp? = null,
     @ServerTimestamp val createdAt: Timestamp? = null
 )
 
@@ -293,6 +295,7 @@ data class CallSession(
     val activeUids: List<String> = emptyList(),
     val screenSharingUid: String? = null,
     val sfuRoomUrl: String? = null,
+    val expiresAt: Timestamp? = null,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )
@@ -310,6 +313,7 @@ data class CallSignal(
     val sdpMid: String? = null,
     val sdpMLineIndex: Long? = null,
     val participantUids: List<String> = emptyList(),
+    val expiresAt: Timestamp? = null,
     @ServerTimestamp val createdAt: Timestamp? = null
 )
 

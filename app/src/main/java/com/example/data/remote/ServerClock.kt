@@ -82,20 +82,26 @@ class ServerClock(
         }
     }
 
-    fun computeExpiresAt(): Timestamp {
-        val expiryMillis = nowServerMillis() + MESSAGE_TTL_MILLIS
+    fun computeExpiresAt(ttlMillis: Long = MESSAGE_TTL_MILLIS): Timestamp {
+        val expiryMillis = nowServerMillis() + ttlMillis
         return Timestamp(Date(expiryMillis))
     }
 
     /**
-     * Returns a cutoff strictly >= (serverNow - 3h) so Firestore security rules evaluating
-     * `resource.data.createdAt > request.time - duration.value(3, 'h')` never reject queries
+     * Returns a cutoff strictly >= (serverNow - ttlMillis) so Firestore security rules evaluating
+     * `resource.data.createdAt > request.time - duration.value(...)` never reject queries
      * due to sub-second network/clock jitter.
      */
-    fun queryCutoffThreeHoursAgo(safetyBufferMs: Long = QUERY_SAFETY_BUFFER_MILLIS): Timestamp {
-        val cutoffMillis = nowServerMillis() - MESSAGE_TTL_MILLIS + safetyBufferMs
+    fun queryCutoffAgo(
+        ttlMillis: Long,
+        safetyBufferMs: Long = QUERY_SAFETY_BUFFER_MILLIS
+    ): Timestamp {
+        val cutoffMillis = nowServerMillis() - ttlMillis + safetyBufferMs
         return Timestamp(Date(cutoffMillis))
     }
+
+    fun queryCutoffThreeHoursAgo(safetyBufferMs: Long = QUERY_SAFETY_BUFFER_MILLIS): Timestamp =
+        queryCutoffAgo(MESSAGE_TTL_MILLIS, safetyBufferMs)
 
     fun isTimestampExpired(
         timestamp: Timestamp?,
@@ -106,23 +112,43 @@ class ServerClock(
         return tsMillis + ttlMillis <= nowMs
     }
 
+    fun isRecordExpired(
+        expiresAt: Timestamp?,
+        createdAt: Timestamp?,
+        ttlMillis: Long,
+        nowMs: Long = nowServerMillis(),
+        hasPendingWrites: Boolean = false
+    ): Boolean {
+        val expiresMillis = expiresAt?.toDate()?.time
+        if (expiresMillis != null && expiresMillis <= nowMs) return true
+        if (!hasPendingWrites) {
+            val createdMillis = createdAt?.toDate()?.time
+            if (createdMillis != null && createdMillis + ttlMillis <= nowMs) return true
+        }
+        return false
+    }
+
     fun isMessageExpired(
         message: ChatMessage,
         nowMs: Long = nowServerMillis(),
         hasPendingWrites: Boolean = false
     ): Boolean {
         if (message.deleted) return true
-        val expiresMillis = message.expiresAt?.toDate()?.time
-        if (expiresMillis != null && expiresMillis <= nowMs) return true
-        if (!hasPendingWrites) {
-            val createdMillis = message.createdAt?.toDate()?.time
-            if (createdMillis != null && createdMillis + MESSAGE_TTL_MILLIS <= nowMs) return true
-        }
-        return false
+        return isRecordExpired(
+            expiresAt = message.expiresAt,
+            createdAt = message.createdAt,
+            ttlMillis = MESSAGE_TTL_MILLIS,
+            nowMs = nowMs,
+            hasPendingWrites = hasPendingWrites
+        )
     }
 
     companion object {
-        const val MESSAGE_TTL_MILLIS: Long = 3L * 60L * 60L * 1000L // 3 hours (10,800,000 ms)
+        const val SIGNAL_TTL_MILLIS: Long = 60L * 60L * 1000L // 1 hour
+        const val MESSAGE_TTL_MILLIS: Long = 3L * 60L * 60L * 1000L // 3 hours
+        const val MODERATION_LOG_TTL_MILLIS: Long = 24L * 60L * 60L * 1000L // 24 hours
+        const val CALL_TTL_MILLIS: Long = 24L * 60L * 60L * 1000L // 24 hours
+        const val FRIEND_REQUEST_TTL_MILLIS: Long = 7L * 24L * 60L * 60L * 1000L // 7 days
         const val QUERY_SAFETY_BUFFER_MILLIS: Long = 5_000L
         private const val RECALIBRATION_INTERVAL_MILLIS: Long = 15L * 60L * 1000L
     }

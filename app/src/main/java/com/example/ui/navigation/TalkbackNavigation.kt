@@ -72,6 +72,7 @@ import com.example.data.model.SfuConfiguration
 import com.example.data.model.ThemeMode
 import com.example.data.model.UiState
 import com.example.data.preferences.AppPreferencesRepository
+import com.example.data.preferences.LocalFriendsCache
 import com.example.data.remote.AuthRepository
 import com.example.data.remote.CallRepository
 import com.example.data.remote.ChatRepository
@@ -124,7 +125,8 @@ fun TalkbackMainShell(
     serverRepo: ServerRepository,
     callRepo: CallRepository,
     prefsRepo: AppPreferencesRepository,
-    serverClock: ServerClock = ServerClock()
+    serverClock: ServerClock = ServerClock(),
+    localFriendsCache: LocalFriendsCache? = null
 ) {
     val context = LocalContext.current
     val appContext = context.applicationContext
@@ -137,7 +139,14 @@ fun TalkbackMainShell(
         factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                SocialChatViewModel(currentUserId, profileRepo, socialRepo, chatRepo, serverClock) as T
+                SocialChatViewModel(
+                    currentUserId = currentUserId,
+                    profileRepo = profileRepo,
+                    socialRepo = socialRepo,
+                    chatRepo = chatRepo,
+                    serverClock = serverClock,
+                    localFriendsCache = localFriendsCache
+                ) as T
         }
     )
 
@@ -194,6 +203,7 @@ fun TalkbackMainShell(
     val selectedConversationId by socialViewModel.selectedConversationId.collectAsStateWithLifecycle()
     val activeMessagesState by socialViewModel.activeMessages.collectAsStateWithLifecycle()
     val peerProfiles by socialViewModel.peerProfiles.collectAsStateWithLifecycle()
+    val favoriteFriendUids by socialViewModel.favoriteFriendUids.collectAsStateWithLifecycle()
 
     val serversState by serverViewModel.servers.collectAsStateWithLifecycle()
     val selectedServerId by serverViewModel.selectedServerId.collectAsStateWithLifecycle()
@@ -403,6 +413,7 @@ fun TalkbackMainShell(
                                 friendshipsState = friendshipsState,
                                 requestsState = requestsState,
                                 peerProfiles = peerProfiles,
+                                favoriteFriendUids = favoriteFriendUids,
                                 socialViewModel = socialViewModel,
                                 callViewModel = callViewModel,
                                 onOpenConversation = { _ -> navigateTopLevel(MessagesRoute) }

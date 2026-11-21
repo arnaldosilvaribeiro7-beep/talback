@@ -6,6 +6,7 @@ import com.example.data.model.PresenceStatus
 import com.example.data.model.ServerMember
 import com.example.data.model.ServerPermission
 import com.example.data.model.UploadedMedia
+import com.example.data.remote.GmailAuthValidator
 import com.example.data.remote.LinkPreviewFetcher
 import com.example.data.remote.ServerClock
 import com.google.firebase.Timestamp
@@ -91,6 +92,12 @@ class ExampleUnitTest {
 
         val expiresAt = clock.computeExpiresAt()
         assertEquals(serverBase + 60_000L + ServerClock.MESSAGE_TTL_MILLIS, expiresAt.toDate().time)
+
+        val logExpiry = clock.computeExpiresAt(ServerClock.MODERATION_LOG_TTL_MILLIS)
+        assertEquals(serverBase + 60_000L + ServerClock.MODERATION_LOG_TTL_MILLIS, logExpiry.toDate().time)
+
+        val signalExpiry = clock.computeExpiresAt(ServerClock.SIGNAL_TTL_MILLIS)
+        assertEquals(serverBase + 60_000L + ServerClock.SIGNAL_TTL_MILLIS, signalExpiry.toDate().time)
     }
 
     @Test
@@ -119,6 +126,24 @@ class ExampleUnitTest {
         assertTrue(clock.isMessageExpired(msg))
         assertTrue(clock.isTimestampExpired(msg.createdAt))
 
+        // 24h moderation log expiration boundary
+        elapsed = ServerClock.MODERATION_LOG_TTL_MILLIS - 1L
+        assertFalse(
+            clock.isRecordExpired(
+                expiresAt = Timestamp(Date(t0 + ServerClock.MODERATION_LOG_TTL_MILLIS)),
+                createdAt = Timestamp(Date(t0)),
+                ttlMillis = ServerClock.MODERATION_LOG_TTL_MILLIS
+            )
+        )
+        elapsed = ServerClock.MODERATION_LOG_TTL_MILLIS
+        assertTrue(
+            clock.isRecordExpired(
+                expiresAt = Timestamp(Date(t0 + ServerClock.MODERATION_LOG_TTL_MILLIS)),
+                createdAt = Timestamp(Date(t0)),
+                ttlMillis = ServerClock.MODERATION_LOG_TTL_MILLIS
+            )
+        )
+
         // Pending local write with old estimated createdAt does not falsely expire if expiresAt is still future
         val pendingMsg = ChatMessage(
             id = "m_pending",
@@ -137,5 +162,21 @@ class ExampleUnitTest {
             storagePath = "chat_attachments/u1/foto.jpg"
         )
         assertEquals("chat_attachments/u1/foto.jpg", uploaded.storagePath)
+    }
+
+    @Test
+    fun `gmail otp validator accepts only @gmail com and 6 digit numeric codes`() {
+        assertEquals("usuario.teste+1@gmail.com", GmailAuthValidator.normalizeGmail("  Usuario.Teste+1@Gmail.COM "))
+        assertTrue(GmailAuthValidator.isValidGmail("dev.talkback@gmail.com"))
+        assertFalse(GmailAuthValidator.isValidGmail("dev@outlook.com"))
+        assertFalse(GmailAuthValidator.isValidGmail("dev@hotmail.com"))
+        assertFalse(GmailAuthValidator.isValidGmail("invalido"))
+
+        assertEquals("ana.dev_01", GmailAuthValidator.normalizeUsername(" @Ana.Dev_01 "))
+        assertNull(GmailAuthValidator.normalizeUsername("ab"))
+
+        assertTrue(GmailAuthValidator.isValidSixDigitCode("123456"))
+        assertFalse(GmailAuthValidator.isValidSixDigitCode("12345"))
+        assertFalse(GmailAuthValidator.isValidSixDigitCode("12a456"))
     }
 }

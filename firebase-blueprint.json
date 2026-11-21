@@ -70,10 +70,11 @@
         "toAvatarUrl": { "type": "string" },
         "status": { "type": "string", "enum": ["pending", "accepted", "declined"] },
         "participantUids": { "type": "array" },
+        "expiresAt": { "type": "string", "format": "date-time", "description": "Server-validated 7-day expiration timestamp" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
       },
-      "required": ["fromUid", "fromUsername", "fromDisplayName", "toUid", "toUsername", "toDisplayName", "status", "participantUids", "createdAt", "updatedAt"]
+      "required": ["fromUid", "fromUsername", "fromDisplayName", "toUid", "toUsername", "toDisplayName", "status", "participantUids", "expiresAt", "createdAt", "updatedAt"]
     },
     "Friendship": {
       "title": "Friendship",
@@ -244,9 +245,10 @@
         "targetUid": { "type": "string" },
         "details": { "type": "string" },
         "memberUids": { "type": "array" },
+        "expiresAt": { "type": "string", "format": "date-time", "description": "Server-validated 24h expiration timestamp" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
       },
-      "required": ["serverId", "actorUid", "actorName", "action", "details", "memberUids", "createdAt"]
+      "required": ["serverId", "actorUid", "actorName", "action", "details", "memberUids", "expiresAt", "createdAt"]
     },
     "ServerBan": {
       "title": "ServerBan",
@@ -277,10 +279,11 @@
         "activeUids": { "type": "array" },
         "screenSharingUid": { "type": "string" },
         "sfuRoomUrl": { "type": "string" },
+        "expiresAt": { "type": "string", "format": "date-time", "description": "Server-validated 24h expiration timestamp" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
       },
-      "required": ["contextType", "contextId", "callerUid", "callerName", "callType", "status", "participantUids", "activeUids", "createdAt", "updatedAt"]
+      "required": ["contextType", "contextId", "callerUid", "callerName", "callType", "status", "participantUids", "activeUids", "expiresAt", "createdAt", "updatedAt"]
     },
     "CallSignal": {
       "title": "CallSignal",
@@ -296,9 +299,28 @@
         "sdpMid": { "type": "string" },
         "sdpMLineIndex": { "type": "integer" },
         "participantUids": { "type": "array" },
+        "expiresAt": { "type": "string", "format": "date-time", "description": "Server-validated 1h expiration timestamp" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
       },
-      "required": ["callId", "fromUid", "toUid", "type", "participantUids", "createdAt"]
+      "required": ["callId", "fromUid", "toUid", "type", "participantUids", "expiresAt", "createdAt"]
+    },
+    "EmailVerificationChallenge": {
+      "title": "EmailVerificationChallenge",
+      "description": "Server-only ephemeral 10-minute OTP challenge for @gmail.com email verification.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "isNewAccount": { "type": "boolean" },
+        "username": { "type": "string" },
+        "displayName": { "type": "string" },
+        "codeHash": { "type": "string" },
+        "salt": { "type": "string" },
+        "attempts": { "type": "integer" },
+        "maxAttempts": { "type": "integer" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "isNewAccount", "codeHash", "salt", "attempts", "maxAttempts", "expiresAt", "createdAt"]
     },
     "UserReport": {
       "title": "UserReport",
@@ -390,6 +412,10 @@
     "/reports/{reportId}": {
       "schema": { "$ref": "#/entities/UserReport" },
       "description": "User and message reports."
+    },
+    "/email_verifications/{challengeId}": {
+      "schema": { "$ref": "#/entities/EmailVerificationChallenge" },
+      "description": "Server-only ephemeral 10m Gmail 6-digit OTP challenges."
     }
   }
 }

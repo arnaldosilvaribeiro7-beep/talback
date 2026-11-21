@@ -19,7 +19,10 @@ const emulatorPort = parseInt(emulatorPortStr, 10);
 
 const pastDate = (offsetMs = 1000) => new Date(Date.now() - offsetMs);
 const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
-const expiryFrom = (createdDate) => new Date(createdDate.getTime() + THREE_HOURS_MS);
+const ONE_HOUR_MS = 60 * 60 * 1000;
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+const expiryFrom = (createdDate, ttlMs = THREE_HOURS_MS) => new Date(createdDate.getTime() + ttlMs);
 
 before(async () => {
   const rules = fs.readFileSync("./firestore.rules", "utf8");
@@ -155,13 +158,20 @@ test("Friend requests and friendships lifecycle", async () => {
       toDisplayName: "Bob",
       status: "pending",
       participantUids: [ALICE_UID, BOB_UID],
+      expiresAt: expiryFrom(now, SEVEN_DAYS_MS),
       createdAt: now,
       updatedAt: now,
     })
   );
 
-  // Filtered query succeeds for participant, unfiltered fails
+  // Filtered bounded query succeeds for participant, unfiltered fails
   await assertSucceeds(
+    bob.collection("friend_requests")
+      .where("participantUids", "array-contains", BOB_UID)
+      .where("createdAt", ">", new Date(Date.now() - SEVEN_DAYS_MS + 5000))
+      .get()
+  );
+  await assertFails(
     bob.collection("friend_requests").where("participantUids", "array-contains", BOB_UID).get()
   );
   await assertFails(bob.collection("friend_requests").get());
@@ -444,6 +454,7 @@ test("Calls, WebRTC signaling, and terminal state lock", async () => {
       status: "ringing",
       participantUids: [ALICE_UID, BOB_UID],
       activeUids: [ALICE_UID],
+      expiresAt: expiryFrom(now, ONE_DAY_MS),
       createdAt: now,
       updatedAt: now,
     })
@@ -457,6 +468,7 @@ test("Calls, WebRTC signaling, and terminal state lock", async () => {
       type: "offer",
       sdp: "v=0\r\no=- 123 2 IN IP4 127.0.0.1\r\n",
       participantUids: [ALICE_UID, BOB_UID],
+      expiresAt: expiryFrom(now, ONE_HOUR_MS),
       createdAt: now,
     })
   );
@@ -464,6 +476,20 @@ test("Calls, WebRTC signaling, and terminal state lock", async () => {
   // Charlie cannot snoop on call signals
   await assertFails(
     charlie.collection("calls").doc("call_1").collection("signals").doc("sig_1").get()
+  );
+
+  // Bounded query succeeds while unbounded fails
+  await assertSucceeds(
+    bob.collection("calls").doc("call_1").collection("signals")
+      .where("participantUids", "array-contains", BOB_UID)
+      .where("createdAt", ">", new Date(Date.now() - ONE_HOUR_MS + 5000))
+      .orderBy("createdAt", "asc")
+      .get()
+  );
+  await assertFails(
+    bob.collection("calls").doc("call_1").collection("signals")
+      .where("participantUids", "array-contains", BOB_UID)
+      .get()
   );
 
   // Bob joins, then ends call
@@ -480,6 +506,11 @@ test("Calls, WebRTC signaling, and terminal state lock", async () => {
       activeUids: [],
       updatedAt: pastDate(100),
     })
+  );
+
+  // Participants can immediately delete signal docs after call ends
+  await assertSucceeds(
+    bob.collection("calls").doc("call_1").collection("signals").doc("sig_1").delete()
   );
 
   // Terminal state lock: cannot reopen an ended call
@@ -794,4 +825,91 @@ test("Server channel ephemeral messages: expired query denial & hard-delete pari
   await assertSucceeds(
     alice.collection("servers").doc("srv_ephem").collection("channels").doc("ch_1").collection("messages").doc("new_m").delete()
   );
+});
+
+test("Temporary logs, signals, calls, and email_verifications obey TTL and access restrictions", async () => {
+  const assert = require("node:assert/strict");
+  const alice = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bob = testEnv.authenticatedContext(BOB_UID).firestore();
+  const now = pastDate(2000);
+
+  // email_verifications is completely locked from clients
+  await assertFails(alice.collection("email_verifications").doc("ch1").get());
+  await assertFails(
+    alice.collection("email_verifications").doc("ch1").set({
+      email: "alice@gmail.com",
+      codeHash: "hacked",
+      expiresAt: expiryFrom(now, ONE_HOUR_MS),
+      createdAt: now,
+    })
+  );
+
+  // Setup server for moderation_logs tests
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    const adminDb = context.firestore();
+    await adminDb.collection("servers").doc("srv_logs").set({
+      name: "Srv Logs",
+      description: "Teste",
+      ownerUid: ALICE_UID,
+      memberUids: [ALICE_UID, BOB_UID],
+      createdAt: now,
+      updatedAt: now,
+    });
+    await adminDb.collection("servers").doc("srv_logs").collection("moderation_logs").doc("old_log").set({
+      serverId: "srv_logs",
+      actorUid: ALICE_UID,
+      actorName: "Alice",
+      action: "kick",
+      details: "Log antigo > 24h",
+      memberUids: [ALICE_UID, BOB_UID],
+      expiresAt: new Date(Date.now() - 10_000),
+      createdAt: new Date(Date.now() - ONE_DAY_MS - 10_000),
+    });
+  });
+
+  // Moderation log requires valid 24h expiresAt
+  await assertFails(
+    alice.collection("servers").doc("srv_logs").collection("moderation_logs").doc("bad_log").set({
+      serverId: "srv_logs",
+      actorUid: ALICE_UID,
+      actorName: "Alice",
+      action: "kick",
+      details: "Sem expiração",
+      memberUids: [ALICE_UID, BOB_UID],
+      createdAt: now,
+    })
+  );
+  await assertSucceeds(
+    alice.collection("servers").doc("srv_logs").collection("moderation_logs").doc("live_log").set({
+      serverId: "srv_logs",
+      actorUid: ALICE_UID,
+      actorName: "Alice",
+      action: "kick",
+      details: "Log temporário 24h",
+      memberUids: [ALICE_UID, BOB_UID],
+      expiresAt: expiryFrom(now, ONE_DAY_MS),
+      createdAt: now,
+    })
+  );
+
+  // Expired log cannot be fetched directly, and unfiltered query fails
+  await assertFails(
+    bob.collection("servers").doc("srv_logs").collection("moderation_logs").doc("old_log").get()
+  );
+  await assertFails(
+    bob.collection("servers").doc("srv_logs").collection("moderation_logs")
+      .where("memberUids", "array-contains", BOB_UID)
+      .get()
+  );
+
+  // 24h-bounded query returns only live_log
+  const logsSnap = await assertSucceeds(
+    bob.collection("servers").doc("srv_logs").collection("moderation_logs")
+      .where("memberUids", "array-contains", BOB_UID)
+      .where("createdAt", ">", new Date(Date.now() - ONE_DAY_MS + 5000))
+      .orderBy("createdAt", "desc")
+      .get()
+  );
+  assert.equal(logsSnap.docs.length, 1);
+  assert.equal(logsSnap.docs[0].id, "live_log");
 });

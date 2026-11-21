@@ -15,5 +15,7 @@
 .cxx
 local.properties
 .env
+functions/.env
+functions/node_modules
 debug.keystore
 *-debug.log

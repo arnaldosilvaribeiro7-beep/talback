@@ -2,9 +2,26 @@
   "firestore": [
     {
       "database": "ai-studio-android-talkback-6b398d18-d5c2-41eb-8893-aab5e5ba0932",
-      "rules": "firestore.rules"
+      "rules": "firestore.rules",
+      "indexes": "firestore.indexes.json"
     }
   ],
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        "*.test.js"
+      ]
+    }
+  ],
+  "storage": {
+    "rules": "storage.rules"
+  },
   "emulators": {
     "firestore": {
       "host": "127.0.0.1",

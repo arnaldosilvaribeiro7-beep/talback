@@ -3,18 +3,28 @@ package com.example
 import android.content.Context
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.model.ChatMessage
+import com.example.data.model.Friendship
 import com.example.data.model.ThemeMode
 import com.example.data.model.UserProfile
 import com.example.data.preferences.AppPreferencesRepository
+import com.example.data.preferences.LocalFriendsCache
+import com.example.data.remote.AuthRepository
 import com.example.ui.components.MessageListAndComposer
 import com.example.ui.components.ProfileHeaderCard
+import com.example.ui.screens.AuthScreen
 import com.example.ui.theme.TalkbackTheme
+import com.google.firebase.FirebaseApp
+import com.google.firebase.FirebaseOptions
+import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -112,5 +122,74 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithText("Respondendo a mensagem expirada ou removida").assertIsDisplayed()
         composeTestRule.onNodeWithText("Entendi!").assertIsDisplayed()
+    }
+
+    @Test
+    fun `local friends cache persists added friends, peer profiles, and local favorites`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val cache = LocalFriendsCache(context)
+        val friend = Friendship(
+            id = "me_peer1",
+            participantUids = listOf("me", "peer1"),
+            userAUid = "me",
+            userAName = "Eu",
+            userAUsername = "eu_dev",
+            userBUid = "peer1",
+            userBName = "Lucas",
+            userBUsername = "lucas_tb"
+        )
+        cache.syncFriendships("me", listOf(friend))
+        cache.updateCachedPeerProfile(
+            "me",
+            UserProfile(
+                userId = "peer1",
+                username = "lucas_tb",
+                displayName = "Lucas Oliveira",
+                statusText = "Jogando",
+                presence = "online"
+            )
+        )
+        val isFav = cache.toggleFavoritePeer("me", "peer1")
+        assertTrue(isFav)
+
+        val loadedFriends = cache.getCachedFriendships("me")
+        assertEquals(1, loadedFriends.size)
+        assertEquals("peer1", loadedFriends.first().peerUid("me"))
+
+        val peerSummary = cache.getCachedPeerProfiles("me")["peer1"]
+        assertEquals("Lucas Oliveira", peerSummary?.displayName)
+        assertEquals("online", peerSummary?.presence)
+        assertTrue(cache.observeFavoritePeerUids("me").first().contains("peer1"))
+
+        cache.removeFriendship("me", "me_peer1")
+        assertTrue(cache.getCachedFriendships("me").isEmpty())
+        assertFalse(cache.observeFavoritePeerUids("me").first().contains("peer1"))
+    }
+
+    @Test
+    fun `auth screen displays google sign-in and gmail 6-digit otp options`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        if (FirebaseApp.getApps(context).isEmpty()) {
+            FirebaseApp.initializeApp(
+                context,
+                FirebaseOptions.Builder()
+                    .setApplicationId(context.getString(R.string.google_app_id))
+                    .setApiKey(context.getString(R.string.google_api_key))
+                    .setProjectId(context.getString(R.string.project_id))
+                    .build()
+            )
+        }
+        val db = FirebaseFirestore.getInstance(context.getString(R.string.firestore_database_id))
+        val repo = AuthRepository(db = db)
+
+        composeTestRule.setContent {
+            TalkbackTheme(themeMode = ThemeMode.DARK) {
+                AuthScreen(authRepository = repo, onAuthSuccess = {})
+            }
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("google_sign_in_button").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("gmail_email_input").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("send_otp_button").performScrollTo().assertIsDisplayed()
     }
 }

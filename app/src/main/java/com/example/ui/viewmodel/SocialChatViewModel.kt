@@ -13,6 +13,7 @@ import com.example.data.model.PresenceStatus
 import com.example.data.model.PrivateAccount
 import com.example.data.model.UiState
 import com.example.data.model.UserProfile
+import com.example.data.preferences.LocalFriendsCache
 import com.example.data.remote.ChatRepository
 import com.example.data.remote.ProfileRepository
 import com.example.data.remote.ServerClock
@@ -44,7 +45,8 @@ class SocialChatViewModel(
     private val profileRepo: ProfileRepository,
     private val socialRepo: SocialRepository,
     private val chatRepo: ChatRepository,
-    private val serverClock: ServerClock = ServerClock()
+    private val serverClock: ServerClock = ServerClock(),
+    private val localFriendsCache: LocalFriendsCache? = null
 ) : ViewModel() {
 
     private val purgedMessageIds = mutableSetOf<String>()
@@ -83,6 +85,10 @@ class SocialChatViewModel(
             emit(UiState.Error(root.message ?: "Erro ao carregar amigos"))
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+
+    val favoriteFriendUids: StateFlow<Set<String>> = (
+        localFriendsCache?.observeFavoritePeerUids(currentUserId) ?: flowOf(emptySet())
+        ).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptySet())
 
     val friendRequests: StateFlow<UiState<List<FriendRequest>>> = socialRepo.observeFriendRequests(currentUserId)
         .map<List<FriendRequest>, UiState<List<FriendRequest>>> { UiState.Success(it) }
@@ -155,6 +161,17 @@ class SocialChatViewModel(
     private val _peerProfiles = MutableStateFlow<Map<String, UserProfile>>(emptyMap())
     val peerProfiles: StateFlow<Map<String, UserProfile>> = _peerProfiles.asStateFlow()
 
+    init {
+        if (localFriendsCache != null) {
+            viewModelScope.launch {
+                val cachedPeers = localFriendsCache.getCachedPeerProfiles(currentUserId)
+                if (cachedPeers.isNotEmpty()) {
+                    _peerProfiles.value = cachedPeers + _peerProfiles.value
+                }
+            }
+        }
+    }
+
     private var typingJob: Job? = null
 
     fun selectConversation(conversationId: String?) {
@@ -167,11 +184,22 @@ class SocialChatViewModel(
     }
 
     fun ensurePeerProfileLoaded(uid: String) {
-        if (uid.isBlank() || _peerProfiles.value.containsKey(uid)) return
+        if (uid.isBlank()) return
         viewModelScope.launch {
             profileRepo.getUserProfile(uid)?.let { profile ->
                 _peerProfiles.value = _peerProfiles.value + (uid to profile)
+                localFriendsCache?.updateCachedPeerProfile(currentUserId, profile)
             }
+        }
+    }
+
+    fun toggleFavoriteFriend(peerUid: String) {
+        if (localFriendsCache == null || peerUid.isBlank()) return
+        viewModelScope.launch {
+            val isFav = localFriendsCache.toggleFavoritePeer(currentUserId, peerUid)
+            _toastEvents.tryEmit(
+                if (isFav) "Amigo fixado nos favoritos locais" else "Amigo removido dos favoritos locais"
+            )
         }
     }
 

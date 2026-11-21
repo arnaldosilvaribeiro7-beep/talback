@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -22,6 +21,9 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.PersonRemove
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -70,6 +72,7 @@ fun FriendsScreen(
     friendshipsState: UiState<List<Friendship>>,
     requestsState: UiState<List<FriendRequest>>,
     peerProfiles: Map<String, UserProfile>,
+    favoriteFriendUids: Set<String> = emptySet(),
     socialViewModel: SocialChatViewModel,
     callViewModel: CallViewModel,
     onOpenConversation: (String) -> Unit
@@ -78,6 +81,7 @@ fun FriendsScreen(
     val launchWithCallPermissions = rememberCallPermissionLauncher()
     var selectedTab by remember { mutableIntStateOf(0) }
     var usernameInput by remember { mutableStateOf("") }
+    var localSearchQuery by remember { mutableStateOf("") }
 
     val friendships = (friendshipsState as? UiState.Success)?.data ?: emptyList()
     val requests = (requestsState as? UiState.Success)?.data ?: emptyList()
@@ -148,6 +152,20 @@ fun FriendsScreen(
 
         when (selectedTab) {
             0, 1 -> {
+                if (friendships.isNotEmpty()) {
+                    OutlinedTextField(
+                        value = localSearchQuery,
+                        onValueChange = { localSearchQuery = it },
+                        placeholder = { Text("Busca rápida nos amigos salvos localmente") },
+                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            .testTag("friends_local_search_input")
+                    )
+                }
+
                 when (friendshipsState) {
                     UiState.Loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator()
@@ -156,19 +174,37 @@ fun FriendsScreen(
                         Text(friendshipsState.message, color = MaterialTheme.colorScheme.error)
                     }
                     is UiState.Success -> {
+                        val query = localSearchQuery.trim().lowercase().removePrefix("@")
                         val visible = friendships.filter { f ->
                             val peerUid = f.peerUid(currentUserId)
                             if (blockedUids.contains(peerUid)) return@filter false
                             if (selectedTab == 0) {
                                 val presence = peerProfiles[peerUid]?.presence ?: "offline"
-                                presence == "online" || presence == "idle" || presence == "dnd"
-                            } else true
-                        }
+                                if (presence != "online" && presence != "idle" && presence != "dnd") return@filter false
+                            }
+                            if (query.isNotBlank()) {
+                                val peer = peerProfiles[peerUid]
+                                val name = (peer?.displayName ?: f.peerName(currentUserId)).lowercase()
+                                val handle = (peer?.username ?: f.peerUsername(currentUserId)).lowercase()
+                                name.contains(query) || handle.contains(query)
+                            } else {
+                                true
+                            }
+                        }.sortedWith(
+                            compareByDescending<Friendship> { favoriteFriendUids.contains(it.peerUid(currentUserId)) }
+                                .thenBy {
+                                    val peerUid = it.peerUid(currentUserId)
+                                    (peerProfiles[peerUid]?.displayName ?: it.peerName(currentUserId)).lowercase()
+                                }
+                        )
                         if (visible.isEmpty()) {
                             Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
                                 Text(
-                                    if (selectedTab == 0) "Nenhum amigo online no momento."
-                                    else "Você ainda não adicionou amigos.",
+                                    when {
+                                        query.isNotBlank() -> "Nenhum amigo encontrado para \"$localSearchQuery\"."
+                                        selectedTab == 0 -> "Nenhum amigo online no momento."
+                                        else -> "Você ainda não adicionou amigos."
+                                    },
                                     color = colors.textMuted
                                 )
                             }
@@ -176,7 +212,7 @@ fun FriendsScreen(
                             LazyColumn(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .padding(12.dp),
+                                    .padding(horizontal = 12.dp, vertical = 4.dp),
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 items(visible, key = { it.id }) { friendship ->
@@ -184,6 +220,7 @@ fun FriendsScreen(
                                     val peer = peerProfiles[peerUid]
                                     val name = peer?.displayName ?: friendship.peerName(currentUserId)
                                     val handle = peer?.username ?: friendship.peerUsername(currentUserId)
+                                    val isFavorite = favoriteFriendUids.contains(peerUid)
 
                                     Card(
                                         shape = RoundedCornerShape(12.dp),
@@ -207,6 +244,15 @@ fun FriendsScreen(
                                                     "@$handle" + (peer?.statusText?.takeIf { it.isNotBlank() }?.let { " • $it" } ?: ""),
                                                     style = MaterialTheme.typography.bodySmall,
                                                     color = colors.textSecondary
+                                                )
+                                            }
+                                            IconButton(onClick = {
+                                                socialViewModel.toggleFavoriteFriend(peerUid)
+                                            }) {
+                                                Icon(
+                                                    imageVector = if (isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
+                                                    contentDescription = if (isFavorite) "Remover dos favoritos locais" else "Fixar nos favoritos locais",
+                                                    tint = if (isFavorite) MaterialTheme.colorScheme.primary else colors.textMuted
                                                 )
                                             }
                                             IconButton(onClick = {

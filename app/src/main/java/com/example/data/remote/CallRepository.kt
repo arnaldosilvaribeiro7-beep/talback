@@ -21,20 +21,42 @@ import kotlinx.coroutines.tasks.await
 
 class CallRepository(
     private val db: FirebaseFirestore,
-    private val auth: FirebaseAuth = Firebase.auth
+    private val auth: FirebaseAuth = Firebase.auth,
+    private val serverClock: ServerClock = ServerClock()
 ) {
     private fun requireUserId(): String =
         auth.currentUser?.uid ?: throw IllegalStateException("Usuário precisa estar autenticado.")
 
     fun observeUserCalls(userId: String): Flow<List<CallSession>> = flow {
         val path = "calls"
+        serverClock.ensureSynced(db, userId)
+        val cutoff = serverClock.queryCutoffAgo(ServerClock.CALL_TTL_MILLIS)
         emitAll(
             db.collection(path)
                 .whereArrayContains("participantUids", userId)
+                .whereGreaterThan("createdAt", cutoff)
                 .orderBy("createdAt", Query.Direction.DESCENDING)
                 .limit(30)
                 .snapshots()
-                .map { snap -> snap.toObjects(CallSession::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
+                .map { snap ->
+                    val nowMs = serverClock.nowServerMillis()
+                    snap.documents.mapNotNull { doc ->
+                        val pending = doc.metadata.hasPendingWrites()
+                        val call = doc.toObject(
+                            CallSession::class.java,
+                            DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                        ) ?: return@mapNotNull null
+                        call.takeIf {
+                            !serverClock.isRecordExpired(
+                                expiresAt = it.expiresAt,
+                                createdAt = it.createdAt,
+                                ttlMillis = ServerClock.CALL_TTL_MILLIS,
+                                nowMs = nowMs,
+                                hasPendingWrites = pending
+                            )
+                        }
+                    }
+                }
                 .catch { error ->
                     val unwrapped = unwrapFirestoreError(error)
                     if (auth.currentUser?.uid == userId) {
@@ -63,12 +85,33 @@ class CallRepository(
 
     fun observeSignals(callId: String, userId: String): Flow<List<CallSignal>> = flow {
         val path = "calls/$callId/signals"
+        serverClock.ensureSynced(db, userId)
+        val cutoff = serverClock.queryCutoffAgo(ServerClock.SIGNAL_TTL_MILLIS)
         emitAll(
             db.collection("calls").document(callId).collection("signals")
                 .whereArrayContains("participantUids", userId)
+                .whereGreaterThan("createdAt", cutoff)
                 .orderBy("createdAt", Query.Direction.ASCENDING)
                 .snapshots()
-                .map { snap -> snap.toObjects(CallSignal::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
+                .map { snap ->
+                    val nowMs = serverClock.nowServerMillis()
+                    snap.documents.mapNotNull { doc ->
+                        val pending = doc.metadata.hasPendingWrites()
+                        val signal = doc.toObject(
+                            CallSignal::class.java,
+                            DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                        ) ?: return@mapNotNull null
+                        signal.takeIf {
+                            !serverClock.isRecordExpired(
+                                expiresAt = it.expiresAt,
+                                createdAt = it.createdAt,
+                                ttlMillis = ServerClock.SIGNAL_TTL_MILLIS,
+                                nowMs = nowMs,
+                                hasPendingWrites = pending
+                            )
+                        }
+                    }
+                }
                 .catch { error ->
                     val unwrapped = unwrapFirestoreError(error)
                     if (auth.currentUser?.uid == userId) {
@@ -91,8 +134,10 @@ class CallRepository(
         val uid = auth.currentUser?.uid ?: return Result.failure(IllegalStateException("Não autenticado."))
         val callRef = db.collection("calls").document()
         return try {
+            serverClock.ensureSynced(db, uid)
             val allParticipants = (participantUids + uid).distinct().take(50)
             val initialStatus = if (contextType == "voice_channel") "active" else "ringing"
+            val expiresAt = serverClock.computeExpiresAt(ServerClock.CALL_TTL_MILLIS)
             val payload = mutableMapOf<String, Any>(
                 "contextType" to contextType,
                 "contextId" to contextId,
@@ -102,6 +147,7 @@ class CallRepository(
                 "status" to initialStatus,
                 "participantUids" to allParticipants,
                 "activeUids" to listOf(uid),
+                "expiresAt" to expiresAt,
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
@@ -119,7 +165,8 @@ class CallRepository(
                 status = initialStatus,
                 participantUids = allParticipants,
                 activeUids = listOf(uid),
-                sfuRoomUrl = sfuRoomUrl
+                sfuRoomUrl = sfuRoomUrl,
+                expiresAt = expiresAt
             )
             Result.success(created)
         } catch (e: CancellationException) {
@@ -153,7 +200,7 @@ class CallRepository(
     suspend fun declineCall(callId: String): Result<Unit> {
         val path = "calls/$callId"
         return try {
-            requireUserId()
+            val uid = requireUserId()
             db.document(path).update(
                 mapOf(
                     "status" to "declined",
@@ -161,6 +208,7 @@ class CallRepository(
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
+            purgeCallSignalsBestEffort(callId, uid)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -173,7 +221,7 @@ class CallRepository(
     suspend fun endCall(callId: String): Result<Unit> {
         val path = "calls/$callId"
         return try {
-            requireUserId()
+            val uid = requireUserId()
             db.document(path).update(
                 mapOf(
                     "status" to "ended",
@@ -181,12 +229,30 @@ class CallRepository(
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
+            purgeCallSignalsBestEffort(callId, uid)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.UPDATE, path)
             Result.failure(e)
+        }
+    }
+
+    private suspend fun purgeCallSignalsBestEffort(callId: String, uid: String) {
+        runCatching {
+            serverClock.ensureSynced(db, uid)
+            val cutoff = serverClock.queryCutoffAgo(ServerClock.SIGNAL_TTL_MILLIS)
+            val snap = db.collection("calls").document(callId).collection("signals")
+                .whereArrayContains("participantUids", uid)
+                .whereGreaterThan("createdAt", cutoff)
+                .get()
+                .await()
+            if (!snap.isEmpty) {
+                val batch = db.batch()
+                snap.documents.forEach { batch.delete(it.reference) }
+                batch.commit().await()
+            }
         }
     }
 
@@ -225,12 +291,14 @@ class CallRepository(
         val uid = auth.currentUser?.uid ?: return Result.failure(IllegalStateException("Não autenticado."))
         val sigRef = db.collection("calls").document(callId).collection("signals").document()
         return try {
+            serverClock.ensureSynced(db, uid)
             val payload = mutableMapOf<String, Any>(
                 "callId" to callId,
                 "fromUid" to uid,
                 "toUid" to toUid,
                 "type" to type,
                 "participantUids" to participantUids,
+                "expiresAt" to serverClock.computeExpiresAt(ServerClock.SIGNAL_TTL_MILLIS),
                 "createdAt" to FieldValue.serverTimestamp()
             )
             sdp?.let { payload["sdp"] = it.take(32000) }

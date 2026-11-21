@@ -158,14 +158,33 @@ class ServerRepository(
 
     fun observeModerationLogs(serverId: String, userId: String): Flow<List<ModerationLog>> = flow {
         val path = "servers/$serverId/moderation_logs"
+        serverClock.ensureSynced(db, userId)
+        val cutoff = serverClock.queryCutoffAgo(ServerClock.MODERATION_LOG_TTL_MILLIS)
         emitAll(
             db.collection("servers").document(serverId).collection("moderation_logs")
                 .whereArrayContains("memberUids", userId)
+                .whereGreaterThan("createdAt", cutoff)
                 .orderBy("createdAt", Query.Direction.DESCENDING)
                 .limit(30)
                 .snapshots()
                 .map { snap ->
-                    snap.toObjects(ModerationLog::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+                    val nowMs = serverClock.nowServerMillis()
+                    snap.documents.mapNotNull { doc ->
+                        val pending = doc.metadata.hasPendingWrites()
+                        val log = doc.toObject(
+                            ModerationLog::class.java,
+                            DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                        ) ?: return@mapNotNull null
+                        log.takeIf {
+                            !serverClock.isRecordExpired(
+                                expiresAt = it.expiresAt,
+                                createdAt = it.createdAt,
+                                ttlMillis = ServerClock.MODERATION_LOG_TTL_MILLIS,
+                                nowMs = nowMs,
+                                hasPendingWrites = pending
+                            )
+                        }
+                    }
                 }
                 .catch { error ->
                     val unwrapped = unwrapFirestoreError(error)
@@ -545,7 +564,8 @@ class ServerRepository(
     ): Result<Unit> {
         val path = "servers/${server.id}/members/$targetUid"
         return try {
-            requireUserId()
+            val uid = requireUserId()
+            serverClock.ensureSynced(db, uid)
             val batch = db.batch()
             batch.update(
                 db.document(path),
@@ -566,6 +586,7 @@ class ServerRepository(
                     "targetUid" to targetUid,
                     "details" to "Cargo alterado para ${role.name}",
                     "memberUids" to server.memberUids,
+                    "expiresAt" to serverClock.computeExpiresAt(ServerClock.MODERATION_LOG_TTL_MILLIS),
                     "createdAt" to FieldValue.serverTimestamp()
                 )
             )
@@ -591,7 +612,8 @@ class ServerRepository(
         }
         val path = "servers/${server.id}"
         return try {
-            requireUserId()
+            val uid = requireUserId()
+            serverClock.ensureSynced(db, uid)
             val serverRef = db.document(path)
             val batch = db.batch()
             batch.update(
@@ -624,6 +646,7 @@ class ServerRepository(
                     "targetUid" to targetUid,
                     "details" to reason.trim().take(300).ifBlank { if (ban) "Membro banido" else "Membro expulso" },
                     "memberUids" to server.memberUids.filter { it != targetUid },
+                    "expiresAt" to serverClock.computeExpiresAt(ServerClock.MODERATION_LOG_TTL_MILLIS),
                     "createdAt" to FieldValue.serverTimestamp()
                 )
             )

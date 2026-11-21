@@ -20,6 +20,11 @@ android {
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    buildConfigField(
+      "String",
+      "AUTH_FUNCTIONS_BASE_URL",
+      "\"https://us-central1-gen-lang-client-0067289898.cloudfunctions.net\""
+    )
   }
 
   // Do not remove or modify these signingConfigs. They are necessary for building, installing,

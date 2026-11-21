@@ -26,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.ThemeMode
 import com.example.data.preferences.AppPreferencesRepository
+import com.example.data.preferences.LocalFriendsCache
 import com.example.data.remote.AuthRepository
 import com.example.data.remote.CallRepository
 import com.example.data.remote.ChatRepository
@@ -91,13 +92,19 @@ class MainActivity : ComponentActivity() {
         val db = FirebaseFirestore.getInstance(getString(R.string.firestore_database_id))
         val storage = runCatching { FirebaseStorage.getInstance() }.getOrNull()
         val serverClock = ServerClock()
+        val localFriendsCache = LocalFriendsCache(applicationContext)
 
         val authRepo = AuthRepository(db = db, auth = auth)
         val profileRepo = ProfileRepository(db = db, storage = storage, auth = auth)
-        val socialRepo = SocialRepository(db = db, auth = auth)
+        val socialRepo = SocialRepository(
+            db = db,
+            auth = auth,
+            serverClock = serverClock,
+            localFriendsCache = localFriendsCache
+        )
         val chatRepo = ChatRepository(db = db, auth = auth, serverClock = serverClock, profileRepo = profileRepo)
         val serverRepo = ServerRepository(db = db, auth = auth, serverClock = serverClock, profileRepo = profileRepo)
-        val callRepo = CallRepository(db = db, auth = auth)
+        val callRepo = CallRepository(db = db, auth = auth, serverClock = serverClock)
 
         setContent {
             val themeMode by prefsRepo.themeMode.collectAsStateWithLifecycle(initialValue = ThemeMode.DARK)
@@ -156,7 +163,8 @@ class MainActivity : ComponentActivity() {
                             serverRepo = serverRepo,
                             callRepo = callRepo,
                             prefsRepo = prefsRepo,
-                            serverClock = serverClock
+                            serverClock = serverClock,
+                            localFriendsCache = localFriendsCache
                         )
                     }
                 }

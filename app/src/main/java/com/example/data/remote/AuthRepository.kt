@@ -9,6 +9,7 @@ import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
 import androidx.credentials.exceptions.NoCredentialException
+import com.example.BuildConfig
 import com.example.R
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
@@ -23,6 +24,7 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -30,6 +32,72 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.util.concurrent.TimeUnit
+
+object GmailAuthValidator {
+    private val GMAIL_REGEX = Regex("^[a-z0-9._%+-]+@gmail\\.com$")
+    private val USERNAME_REGEX = Regex("^[a-z0-9_.]{3,30}$")
+    private val CODE_REGEX = Regex("^\\d{6}$")
+
+    fun normalizeGmail(rawEmail: String): String? {
+        val cleaned = rawEmail.trim().lowercase()
+        if (cleaned.isBlank() || cleaned.length > 160) return null
+        return cleaned.takeIf { GMAIL_REGEX.matches(it) }
+    }
+
+    fun isValidGmail(rawEmail: String): Boolean = normalizeGmail(rawEmail) != null
+
+    fun normalizeUsername(rawUsername: String): String? {
+        val cleaned = rawUsername.trim().lowercase().removePrefix("@")
+        return cleaned.takeIf { USERNAME_REGEX.matches(it) }
+    }
+
+    fun isValidSixDigitCode(rawCode: String): Boolean = CODE_REGEX.matches(rawCode.trim())
+}
+
+@Serializable
+data class GmailOtpChallenge(
+    val challengeId: String,
+    val email: String,
+    val expiresInSeconds: Int = 600,
+    val resendAfterSeconds: Int = 60
+)
+
+@Serializable
+private data class RequestOtpBody(
+    val email: String,
+    val username: String? = null,
+    val displayName: String? = null,
+    val isNewAccount: Boolean
+)
+
+@Serializable
+private data class VerifyOtpBody(
+    val challengeId: String,
+    val email: String,
+    val code: String,
+    val username: String? = null,
+    val displayName: String? = null
+)
+
+@Serializable
+private data class VerifyOtpResponse(
+    val customToken: String,
+    val uid: String = "",
+    val email: String = ""
+)
+
+@Serializable
+private data class OtpErrorResponse(
+    val error: String? = null
+)
 
 fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
     val listener = FirebaseAuth.AuthStateListener { firebaseAuth ->
@@ -41,8 +109,16 @@ fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
 
 class AuthRepository(
     private val db: FirebaseFirestore,
-    private val auth: FirebaseAuth = Firebase.auth
+    private val auth: FirebaseAuth = Firebase.auth,
+    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(25, TimeUnit.SECONDS)
+        .build(),
+    private val functionsBaseUrl: String = BuildConfig.AUTH_FUNCTIONS_BASE_URL.trimEnd('/')
 ) {
+    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+    private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+
     fun attemptAutoSignIn(
         context: Context,
         credentialManager: CredentialManager,
@@ -134,7 +210,7 @@ class AuthRepository(
                 onAuthCancelled()
             } catch (e: NoCredentialException) {
                 Log.w("Auth", "No Google credentials available on device: ${e.message}", e)
-                onAuthError("Nenhuma conta Google encontrada neste dispositivo. Adicione uma conta Google nas configurações.")
+                onAuthError("Nenhuma conta Google encontrada neste dispositivo. Adicione uma conta Google ou use @gmail.com com código de 6 dígitos.")
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -144,19 +220,128 @@ class AuthRepository(
         }
     }
 
-    suspend fun ensureUserInitialized(user: FirebaseUser): Result<Unit> {
+    suspend fun requestGmailVerificationCode(
+        rawEmail: String,
+        rawUsername: String? = null,
+        rawDisplayName: String? = null,
+        isNewAccount: Boolean
+    ): Result<GmailOtpChallenge> {
+        val normalizedEmail = GmailAuthValidator.normalizeGmail(rawEmail)
+            ?: return Result.failure(
+                IllegalArgumentException("Use exclusivamente um endereço @gmail.com válido.")
+            )
+        var normalizedUsername: String? = null
+        var cleanedDisplayName: String? = null
+        if (isNewAccount) {
+            normalizedUsername = GmailAuthValidator.normalizeUsername(rawUsername.orEmpty())
+                ?: return Result.failure(
+                    IllegalArgumentException("Escolha um @usuário válido (3 a 30 caracteres: a-z, 0-9, _ ou .).")
+                )
+            cleanedDisplayName = rawDisplayName?.trim()?.take(50)?.takeIf { it.isNotBlank() }
+                ?: normalizedUsername
+        }
+
+        return try {
+            val payload = json.encodeToString(
+                RequestOtpBody(
+                    email = normalizedEmail,
+                    username = normalizedUsername,
+                    displayName = cleanedDisplayName,
+                    isNewAccount = isNewAccount
+                )
+            )
+            val responseBody = postJson("$functionsBaseUrl/requestEmailCode", payload)
+            val challenge = json.decodeFromString<GmailOtpChallenge>(responseBody)
+            Result.success(challenge)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun verifyGmailCodeAndSignIn(
+        challengeId: String,
+        rawEmail: String,
+        rawCode: String,
+        rawUsername: String? = null,
+        rawDisplayName: String? = null
+    ): Result<Unit> {
+        val normalizedEmail = GmailAuthValidator.normalizeGmail(rawEmail)
+            ?: return Result.failure(IllegalArgumentException("Use um endereço @gmail.com válido."))
+        val cleanCode = rawCode.trim()
+        if (!GmailAuthValidator.isValidSixDigitCode(cleanCode)) {
+            return Result.failure(IllegalArgumentException("Digite o código numérico de 6 dígitos."))
+        }
+        val cleanUsername = rawUsername?.let { GmailAuthValidator.normalizeUsername(it) }
+        val cleanDisplayName = rawDisplayName?.trim()?.take(50)?.takeIf { it.isNotBlank() }
+
+        return try {
+            val payload = json.encodeToString(
+                VerifyOtpBody(
+                    challengeId = challengeId,
+                    email = normalizedEmail,
+                    code = cleanCode,
+                    username = cleanUsername,
+                    displayName = cleanDisplayName
+                )
+            )
+            val responseBody = postJson("$functionsBaseUrl/verifyEmailCode", payload)
+            val verified = json.decodeFromString<VerifyOtpResponse>(responseBody)
+            val authResult = auth.signInWithCustomToken(verified.customToken).await()
+            val user = authResult.user
+                ?: return Result.failure(IllegalStateException("Não foi possível concluir a sessão no Firebase Auth."))
+            ensureUserInitialized(user, preferredUsername = cleanUsername, preferredDisplayName = cleanDisplayName)
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private suspend fun postJson(url: String, jsonBody: String): String = withContext(Dispatchers.IO) {
+        val req = Request.Builder()
+            .url(url)
+            .post(jsonBody.toRequestBody(jsonMediaType))
+            .build()
+        httpClient.newCall(req).execute().use { resp ->
+            val rawBody = resp.body?.string().orEmpty()
+            if (resp.isSuccessful) {
+                return@withContext rawBody
+            }
+            val parsedMessage = runCatching {
+                json.decodeFromString<OtpErrorResponse>(rawBody).error
+            }.getOrNull()
+            val message = when {
+                !parsedMessage.isNullOrBlank() -> parsedMessage
+                resp.code == 404 -> "Serviço de código por e-mail ainda não implantado no Firebase Functions (deploy functions)."
+                else -> "Erro ao comunicar com servidor de verificação (${resp.code})."
+            }
+            throw IllegalStateException(message)
+        }
+    }
+
+    suspend fun ensureUserInitialized(
+        user: FirebaseUser,
+        preferredUsername: String? = null,
+        preferredDisplayName: String? = null
+    ): Result<Unit> {
         val uid = user.uid
         val userDocRef = db.collection("users").document(uid)
         return try {
             val snapshot = userDocRef.get().await()
             if (!snapshot.exists()) {
-                val rawDisplay = user.displayName?.takeIf { it.isNotBlank() } ?: "Usuário Talkback"
+                val rawDisplay = preferredDisplayName?.takeIf { it.isNotBlank() }
+                    ?: user.displayName?.takeIf { it.isNotBlank() }
+                    ?: "Usuário Talkback"
                 val displayName = rawDisplay.take(50)
                 val baseHandle = rawDisplay.lowercase()
                     .replace(Regex("[^a-z0-9_]"), "")
                     .ifBlank { "talkback" }
                     .take(18)
-                val username = "${baseHandle}_${uid.take(6).lowercase()}"
+                val username = preferredUsername?.takeIf { it.matches(Regex("^[a-z0-9_.]{3,30}$")) }
+                    ?: "${baseHandle}_${uid.take(6).lowercase()}"
                 val avatarUrl = user.photoUrl?.toString()?.take(500)
 
                 val profileMap = mutableMapOf<String, Any>(

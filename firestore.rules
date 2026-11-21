@@ -108,6 +108,20 @@ service cloud.firestore {
              isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt);
     }
 
+    function isValidBoundedExpiry(data, minDur, maxDur) {
+      return data.expiresAt is timestamp &&
+             data.expiresAt > request.time &&
+             data.expiresAt >= data.createdAt + minDur &&
+             data.expiresAt <= data.createdAt + maxDur;
+    }
+
+    function isWithinTtlWindow(data, ttlDur) {
+      return data.createdAt is timestamp &&
+             data.expiresAt is timestamp &&
+             data.expiresAt > request.time &&
+             (data.createdAt + ttlDur) > request.time;
+    }
+
     function isValidFriendRequest(data) {
       return data.fromUid is string && data.fromUid.size() >= 1 && data.fromUid.size() <= 128 &&
              isValidUsername(data.fromUsername) &&
@@ -121,7 +135,8 @@ service cloud.firestore {
              data.status in ['pending', 'accepted', 'declined'] &&
              isBoundedStringList(data.participantUids, 2) && data.participantUids.size() == 2 &&
              data.fromUid in data.participantUids && data.toUid in data.participantUids &&
-             isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt);
+             isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt) &&
+             isValidBoundedExpiry(data, duration.value(167, 'h') + duration.value(55, 'm'), duration.value(168, 'h') + duration.value(5, 'm'));
     }
 
     function isValidFriendship(data) {
@@ -257,7 +272,8 @@ service cloud.firestore {
              isOptionalString(data, 'targetUid', 128) &&
              data.details is string && data.details.size() <= 300 &&
              isBoundedStringList(data.memberUids, 200) &&
-             isValidTimestamp(data.createdAt);
+             isValidTimestamp(data.createdAt) &&
+             isValidBoundedExpiry(data, duration.value(23, 'h') + duration.value(55, 'm'), duration.value(24, 'h') + duration.value(5, 'm'));
     }
 
     function isValidServerBan(data, serverId, bannedUid) {
@@ -280,7 +296,8 @@ service cloud.firestore {
              isBoundedStringList(data.activeUids, 50) &&
              isOptionalString(data, 'screenSharingUid', 128) &&
              isOptionalString(data, 'sfuRoomUrl', 500) &&
-             isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt);
+             isValidTimestamp(data.createdAt) && isValidTimestamp(data.updatedAt) &&
+             isValidBoundedExpiry(data, duration.value(23, 'h') + duration.value(55, 'm'), duration.value(24, 'h') + duration.value(5, 'm'));
     }
 
     function isValidCallSignal(data, callId) {
@@ -293,7 +310,8 @@ service cloud.firestore {
              isOptionalString(data, 'sdpMid', 64) &&
              (!('sdpMLineIndex' in data) || data.sdpMLineIndex is int) &&
              isBoundedStringList(data.participantUids, 50) &&
-             isValidTimestamp(data.createdAt);
+             isValidTimestamp(data.createdAt) &&
+             isValidBoundedExpiry(data, duration.value(55, 'm'), duration.value(65, 'm'));
     }
 
     function isValidReport(data) {
@@ -367,15 +385,20 @@ service cloud.firestore {
       }
     }
 
+    // Strictly server-only (Admin SDK / Cloud Functions) ephemeral OTP verification challenges
+    match /email_verifications/{challengeId} {
+      allow read, write: if false;
+    }
+
     match /friend_requests/{requestId} {
-      allow get: if isSignedIn() && isValidId(requestId) && request.auth.uid in existing().participantUids;
-      allow list: if isSignedIn() && request.auth.uid in resource.data.participantUids;
+      allow get: if isSignedIn() && isValidId(requestId) && request.auth.uid in existing().participantUids && isWithinTtlWindow(existing(), duration.value(168, 'h'));
+      allow list: if isSignedIn() && request.auth.uid in resource.data.participantUids && resource.data.createdAt > request.time - duration.value(168, 'h');
       allow create: if isSignedIn() &&
                        isValidId(requestId) &&
                        incoming().fromUid == request.auth.uid &&
                        incoming().status == 'pending' &&
-                       incoming().keys().hasAll(['fromUid', 'fromUsername', 'fromDisplayName', 'toUid', 'toUsername', 'toDisplayName', 'status', 'participantUids', 'createdAt', 'updatedAt']) &&
-                       incoming().keys().hasOnly(['fromUid', 'fromUsername', 'fromDisplayName', 'fromAvatarUrl', 'toUid', 'toUsername', 'toDisplayName', 'toAvatarUrl', 'status', 'participantUids', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasAll(['fromUid', 'fromUsername', 'fromDisplayName', 'toUid', 'toUsername', 'toDisplayName', 'status', 'participantUids', 'expiresAt', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['fromUid', 'fromUsername', 'fromDisplayName', 'fromAvatarUrl', 'toUid', 'toUsername', 'toDisplayName', 'toAvatarUrl', 'status', 'participantUids', 'expiresAt', 'createdAt', 'updatedAt']) &&
                        isValidFriendRequest(incoming());
       allow update: if isSignedIn() &&
                        isValidId(requestId) &&
@@ -384,6 +407,7 @@ service cloud.firestore {
                        request.auth.uid == existing().toUid &&
                        incoming().status in ['accepted', 'declined'] &&
                        incoming().createdAt == existing().createdAt &&
+                       incoming().expiresAt == existing().expiresAt &&
                        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
       allow delete: if isSignedIn() && isValidId(requestId) && request.auth.uid in existing().participantUids;
     }
@@ -622,13 +646,13 @@ service cloud.firestore {
       }
 
       match /moderation_logs/{logId} {
-        allow get: if isSignedIn() && isValidId(serverId) && isValidId(logId) && request.auth.uid in existing().memberUids;
-        allow list: if isSignedIn() && request.auth.uid in resource.data.memberUids;
+        allow get: if isSignedIn() && isValidId(serverId) && isValidId(logId) && request.auth.uid in existing().memberUids && isWithinTtlWindow(existing(), duration.value(24, 'h'));
+        allow list: if isSignedIn() && request.auth.uid in resource.data.memberUids && resource.data.createdAt > request.time - duration.value(24, 'h');
         allow create: if isSignedIn() &&
                          isValidId(serverId) && isValidId(logId) &&
                          incoming().actorUid == request.auth.uid &&
-                         incoming().keys().hasAll(['serverId', 'actorUid', 'actorName', 'action', 'details', 'memberUids', 'createdAt']) &&
-                         incoming().keys().hasOnly(['serverId', 'actorUid', 'actorName', 'action', 'targetUid', 'details', 'memberUids', 'createdAt']) &&
+                         incoming().keys().hasAll(['serverId', 'actorUid', 'actorName', 'action', 'details', 'memberUids', 'expiresAt', 'createdAt']) &&
+                         incoming().keys().hasOnly(['serverId', 'actorUid', 'actorName', 'action', 'targetUid', 'details', 'memberUids', 'expiresAt', 'createdAt']) &&
                          isValidModerationLog(incoming(), serverId) &&
                          (hasServerPermission(serverId, 'MANAGE_MEMBERS') || hasServerPermission(serverId, 'DELETE_MESSAGES') || hasServerPermission(serverId, 'MANAGE_CHANNELS') || hasServerPermission(serverId, 'INVITE_MEMBERS'));
         allow update, delete: if false;
@@ -679,14 +703,14 @@ service cloud.firestore {
     }
 
     match /calls/{callId} {
-      allow get: if isSignedIn() && isValidId(callId) && request.auth.uid in existing().participantUids;
-      allow list: if isSignedIn() && request.auth.uid in resource.data.participantUids;
+      allow get: if isSignedIn() && isValidId(callId) && request.auth.uid in existing().participantUids && isWithinTtlWindow(existing(), duration.value(24, 'h'));
+      allow list: if isSignedIn() && request.auth.uid in resource.data.participantUids && resource.data.createdAt > request.time - duration.value(24, 'h');
       allow create: if isSignedIn() &&
                        isValidId(callId) &&
                        incoming().callerUid == request.auth.uid &&
                        request.auth.uid in incoming().participantUids &&
-                       incoming().keys().hasAll(['contextType', 'contextId', 'callerUid', 'callerName', 'callType', 'status', 'participantUids', 'activeUids', 'createdAt', 'updatedAt']) &&
-                       incoming().keys().hasOnly(['contextType', 'contextId', 'serverId', 'callerUid', 'callerName', 'callType', 'status', 'participantUids', 'activeUids', 'screenSharingUid', 'sfuRoomUrl', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasAll(['contextType', 'contextId', 'callerUid', 'callerName', 'callType', 'status', 'participantUids', 'activeUids', 'expiresAt', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['contextType', 'contextId', 'serverId', 'callerUid', 'callerName', 'callType', 'status', 'participantUids', 'activeUids', 'screenSharingUid', 'sfuRoomUrl', 'expiresAt', 'createdAt', 'updatedAt']) &&
                        isValidCallSession(incoming());
       allow update: if isSignedIn() &&
                        isValidId(callId) &&
@@ -695,6 +719,7 @@ service cloud.firestore {
                        incoming().callerUid == existing().callerUid &&
                        incoming().contextId == existing().contextId &&
                        incoming().createdAt == existing().createdAt &&
+                       incoming().expiresAt == existing().expiresAt &&
                        isValidCallSession(incoming()) && (
                          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'activeUids', 'updatedAt']) ||
                          incoming().diff(existing()).affectedKeys().hasOnly(['screenSharingUid', 'updatedAt']) ||
@@ -703,14 +728,14 @@ service cloud.firestore {
       allow delete: if isSignedIn() && isValidId(callId) && existing().callerUid == request.auth.uid;
 
       match /signals/{signalId} {
-        allow get: if isSignedIn() && isValidId(callId) && isValidId(signalId) && request.auth.uid in existing().participantUids;
-        allow list: if isSignedIn() && request.auth.uid in resource.data.participantUids;
+        allow get: if isSignedIn() && isValidId(callId) && isValidId(signalId) && request.auth.uid in existing().participantUids && isWithinTtlWindow(existing(), duration.value(1, 'h'));
+        allow list: if isSignedIn() && request.auth.uid in resource.data.participantUids && resource.data.createdAt > request.time - duration.value(1, 'h');
         allow create: if isSignedIn() &&
                          isValidId(callId) && isValidId(signalId) &&
                          incoming().fromUid == request.auth.uid &&
                          request.auth.uid in incoming().participantUids &&
-                         incoming().keys().hasAll(['callId', 'fromUid', 'toUid', 'type', 'participantUids', 'createdAt']) &&
-                         incoming().keys().hasOnly(['callId', 'fromUid', 'toUid', 'type', 'sdp', 'iceCandidate', 'sdpMid', 'sdpMLineIndex', 'participantUids', 'createdAt']) &&
+                         incoming().keys().hasAll(['callId', 'fromUid', 'toUid', 'type', 'participantUids', 'expiresAt', 'createdAt']) &&
+                         incoming().keys().hasOnly(['callId', 'fromUid', 'toUid', 'type', 'sdp', 'iceCandidate', 'sdpMid', 'sdpMLineIndex', 'participantUids', 'expiresAt', 'createdAt']) &&
                          isValidCallSignal(incoming(), callId);
         allow update: if false;
         allow delete: if isSignedIn() && isValidId(callId) && isValidId(signalId) && request.auth.uid in existing().participantUids;

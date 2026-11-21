@@ -3,6 +3,7 @@ package com.example.data.remote
 import com.example.data.model.FriendRequest
 import com.example.data.model.Friendship
 import com.example.data.model.UserProfile
+import com.example.data.preferences.LocalFriendsCache
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
@@ -20,7 +21,9 @@ import kotlinx.coroutines.tasks.await
 
 class SocialRepository(
     private val db: FirebaseFirestore,
-    private val auth: FirebaseAuth = Firebase.auth
+    private val auth: FirebaseAuth = Firebase.auth,
+    private val serverClock: ServerClock = ServerClock(),
+    private val localFriendsCache: LocalFriendsCache? = null
 ) {
     private fun requireUserId(): String =
         auth.currentUser?.uid
@@ -28,13 +31,33 @@ class SocialRepository(
 
     fun observeFriendships(userId: String): Flow<List<Friendship>> = flow {
         val path = "friendships"
+        val cached = localFriendsCache?.getCachedFriendships(userId).orEmpty()
+        if (cached.isNotEmpty()) {
+            emit(cached)
+        }
         emitAll(
             db.collection(path)
                 .whereArrayContains("participantUids", userId)
                 .snapshots()
-                .map { snap -> snap.toObjects(Friendship::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
+                .map { snap ->
+                    val list = snap.toObjects(
+                        Friendship::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                    )
+                    if (!snap.metadata.isFromCache || list.isNotEmpty()) {
+                        localFriendsCache?.syncFriendships(userId, list)
+                    }
+                    list.ifEmpty {
+                        localFriendsCache?.getCachedFriendships(userId).orEmpty()
+                    }
+                }
                 .catch { error ->
                     val unwrapped = unwrapFirestoreError(error)
+                    val fallback = localFriendsCache?.getCachedFriendships(userId).orEmpty()
+                    if (fallback.isNotEmpty()) {
+                        emit(fallback)
+                        return@catch
+                    }
                     if (auth.currentUser?.uid == userId) {
                         handleFirestoreError(unwrapped, OperationType.LIST, path)
                     }
@@ -45,13 +68,31 @@ class SocialRepository(
 
     fun observeFriendRequests(userId: String): Flow<List<FriendRequest>> = flow {
         val path = "friend_requests"
+        serverClock.ensureSynced(db, userId)
+        val cutoff = serverClock.queryCutoffAgo(ServerClock.FRIEND_REQUEST_TTL_MILLIS)
         emitAll(
             db.collection(path)
                 .whereArrayContains("participantUids", userId)
+                .whereGreaterThan("createdAt", cutoff)
                 .snapshots()
                 .map { snap ->
-                    snap.toObjects(FriendRequest::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-                        .filter { it.status == "pending" }
+                    val nowMs = serverClock.nowServerMillis()
+                    snap.documents.mapNotNull { doc ->
+                        val pending = doc.metadata.hasPendingWrites()
+                        val req = doc.toObject(
+                            FriendRequest::class.java,
+                            DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                        ) ?: return@mapNotNull null
+                        req.takeIf {
+                            it.status == "pending" && !serverClock.isRecordExpired(
+                                expiresAt = it.expiresAt,
+                                createdAt = it.createdAt,
+                                ttlMillis = ServerClock.FRIEND_REQUEST_TTL_MILLIS,
+                                nowMs = nowMs,
+                                hasPendingWrites = pending
+                            )
+                        }
+                    }
                 }
                 .catch { error ->
                     val unwrapped = unwrapFirestoreError(error)
@@ -70,6 +111,7 @@ class SocialRepository(
             return Result.failure(IllegalArgumentException("Nome de usuário inválido."))
         }
         return try {
+            serverClock.ensureSynced(db, uid)
             val claimSnap = db.collection("usernames").document(targetUsername).get().await()
             if (!claimSnap.exists()) {
                 return Result.failure(IllegalStateException("Usuário @$targetUsername não encontrado."))
@@ -99,6 +141,7 @@ class SocialRepository(
                 "toDisplayName" to targetUser.displayName,
                 "status" to "pending",
                 "participantUids" to listOf(uid, targetUid),
+                "expiresAt" to serverClock.computeExpiresAt(ServerClock.FRIEND_REQUEST_TTL_MILLIS),
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
@@ -135,12 +178,26 @@ class SocialRepository(
             request.toAvatarUrl?.takeIf { it.isNotBlank() }?.let { friendshipMap["userBAvatarUrl"] = it }
 
             val batch = db.batch()
-            batch.update(
-                db.collection("friend_requests").document(request.id),
-                mapOf("status" to "accepted", "updatedAt" to FieldValue.serverTimestamp())
-            )
+            // Remove temporary friend request document immediately once converted into a friendship
+            batch.delete(db.collection("friend_requests").document(request.id))
             batch.set(db.collection("friendships").document(friendshipId), friendshipMap)
             batch.commit().await()
+
+            localFriendsCache?.upsertFriendship(
+                userId = uid,
+                friendship = Friendship(
+                    id = friendshipId,
+                    participantUids = listOf(request.fromUid, request.toUid),
+                    userAUid = request.fromUid,
+                    userAName = request.fromDisplayName,
+                    userAUsername = request.fromUsername,
+                    userAAvatarUrl = request.fromAvatarUrl,
+                    userBUid = request.toUid,
+                    userBName = request.toDisplayName,
+                    userBUsername = request.toUsername,
+                    userBAvatarUrl = request.toAvatarUrl
+                )
+            )
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -165,8 +222,9 @@ class SocialRepository(
 
     suspend fun removeFriend(friendshipId: String): Result<Unit> {
         return try {
-            requireUserId()
+            val uid = requireUserId()
             db.collection("friendships").document(friendshipId).delete().await()
+            localFriendsCache?.removeFriendship(uid, friendshipId)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
