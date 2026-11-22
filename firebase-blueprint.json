@@ -322,6 +322,16 @@
       },
       "required": ["email", "isNewAccount", "codeHash", "salt", "attempts", "maxAttempts", "expiresAt", "createdAt"]
     },
+    "AccountRegistry": {
+      "title": "AccountRegistry",
+      "description": "Singleton registry in /app_meta/account_registry enforcing the maximum limit of 2 registered user accounts.",
+      "type": "object",
+      "properties": {
+        "registeredUids": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp" }
+      },
+      "required": ["registeredUids", "updatedAt"]
+    },
     "UserReport": {
       "title": "UserReport",
       "description": "Abuse or moderation report submitted by a user.",
@@ -341,6 +351,10 @@
     }
   },
   "firestore": {
+    "/app_meta/{docId}": {
+      "schema": { "$ref": "#/entities/AccountRegistry" },
+      "description": "Singleton registry enforcing at most 2 registered accounts."
+    },
     "/usernames/{username}": {
       "schema": { "$ref": "#/entities/UsernameClaim" },
       "description": "Unique username lookup directory."

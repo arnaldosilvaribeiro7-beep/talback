@@ -588,7 +588,7 @@ fun ProfileScreen(
                 // Account & Sign out
                 SectionCard(title = "Conta") {
                     Text(
-                        text = "Conectado via Google: ${privateAccount?.email ?: currentUserId}",
+                        text = "Conta conectada: ${privateAccount?.email ?: currentUserId}",
                         style = MaterialTheme.typography.bodyMedium,
                         color = colors.textSecondary
                     )

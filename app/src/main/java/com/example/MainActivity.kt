@@ -18,7 +18,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
@@ -30,8 +34,7 @@ import com.example.data.preferences.LocalFriendsCache
 import com.example.data.remote.AuthRepository
 import com.example.data.remote.CallRepository
 import com.example.data.remote.ChatRepository
-import com.example.data.remote.GoogleOAuthCoordinator
-import com.example.data.remote.OAuthUiState
+import com.example.data.remote.EmailAuthValidator
 import com.example.data.remote.ProfileRepository
 import com.example.data.remote.ServerClock
 import com.example.data.remote.ServerRepository
@@ -48,10 +51,10 @@ import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.storage.FirebaseStorage
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 
 class MainActivity : ComponentActivity() {
-    private var oauthCoordinator: GoogleOAuthCoordinator? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -99,14 +102,6 @@ class MainActivity : ComponentActivity() {
         val localFriendsCache = LocalFriendsCache(applicationContext)
 
         val authRepo = AuthRepository(db = db, auth = auth)
-        val coordinator = GoogleOAuthCoordinator(
-            context = applicationContext,
-            auth = auth,
-            authRepository = authRepo
-        ).also {
-            it.checkPendingAuthResult()
-        }
-        oauthCoordinator = coordinator
 
         val profileRepo = ProfileRepository(db = db, storage = storage, auth = auth)
         val socialRepo = SocialRepository(
@@ -144,9 +139,12 @@ class MainActivity : ComponentActivity() {
 
             val currentUser by remember { auth.authStateFlow() }
                 .collectAsStateWithLifecycle(initialValue = auth.currentUser)
+            val isCompletingAuthGate by authRepo.isCompletingAuthGate
+                .collectAsStateWithLifecycle(initialValue = false)
 
-            LaunchedEffect(currentUser?.uid) {
-                val user = currentUser ?: return@LaunchedEffect
+            LaunchedEffect(currentUser?.uid, isCompletingAuthGate) {
+                val user = currentUser
+                if (user == null || isCompletingAuthGate) return@LaunchedEffect
                 authRepo.ensureUserInitialized(user)
                 serverClock.syncWithServer(db, user.uid)
                 runCatching {
@@ -157,16 +155,40 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            val oauthUiState by coordinator.uiState.collectAsStateWithLifecycle(initialValue = OAuthUiState.Idle)
+            val scope = rememberCoroutineScope()
+            var isAuthSubmitting by rememberSaveable { mutableStateOf(false) }
+            var authErrorMessage by rememberSaveable { mutableStateOf<String?>(null) }
 
             TalkbackTheme(themeMode = themeMode) {
-                val uid = currentUser?.uid
+                val uid = if (isCompletingAuthGate) null else currentUser?.uid
                 if (uid == null) {
                     AuthScreen(
-                        oauthUiState = oauthUiState,
-                        onGoogleSignInClick = {
-                            coordinator.clearError()
-                            coordinator.startGoogleOAuth(this@MainActivity)
+                        isLoading = isAuthSubmitting || isCompletingAuthGate,
+                        errorMessage = authErrorMessage,
+                        onClearError = { authErrorMessage = null },
+                        onLoginSubmit = { email, password ->
+                            if (isAuthSubmitting) return@AuthScreen
+                            scope.launch {
+                                isAuthSubmitting = true
+                                authErrorMessage = null
+                                val result = authRepo.signInWithEmailAndPassword(email, password)
+                                result.onFailure { err ->
+                                    authErrorMessage = EmailAuthValidator.mapAuthException(err)
+                                }
+                                isAuthSubmitting = false
+                            }
+                        },
+                        onSignUpSubmit = { email, password ->
+                            if (isAuthSubmitting) return@AuthScreen
+                            scope.launch {
+                                isAuthSubmitting = true
+                                authErrorMessage = null
+                                val result = authRepo.signUpWithEmailAndPassword(email, password)
+                                result.onFailure { err ->
+                                    authErrorMessage = EmailAuthValidator.mapAuthException(err)
+                                }
+                                isAuthSubmitting = false
+                            }
                         }
                     )
                 } else {
@@ -188,11 +210,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-    }
-
-    override fun onStart() {
-        super.onStart()
-        oauthCoordinator?.checkPendingAuthResult()
     }
 
     private fun ensureFirebaseInitialized(): Boolean {

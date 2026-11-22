@@ -41,6 +41,11 @@ service cloud.firestore {
       return lst is list && lst.size() <= maxSize && (lst.size() == 0 || lst[0] is string);
     }
 
+    function isRegisteredAccount(userId) {
+      return exists(/databases/$(database)/documents/app_meta/account_registry) &&
+             userId in get(/databases/$(database)/documents/app_meta/account_registry).data.registeredUids;
+    }
+
     // Server RBAC helpers (used on single-doc create/update/delete, NEVER inside allow list)
     function serverDoc(serverId) {
       return get(/databases/$(database)/documents/servers/$(serverId)).data;
@@ -327,6 +332,32 @@ service cloud.firestore {
 
     // --- COLLECTION RULES ---
 
+    match /app_meta/{docId} {
+      allow get: if isSignedIn() && docId == 'account_registry';
+      allow list: if false;
+      allow create: if isSignedIn() &&
+                       docId == 'account_registry' &&
+                       incoming().keys().hasAll(['registeredUids', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['registeredUids', 'updatedAt']) &&
+                       incoming().registeredUids is list &&
+                       incoming().registeredUids.size() == 1 &&
+                       incoming().registeredUids[0] == request.auth.uid &&
+                       isValidTimestamp(incoming().updatedAt);
+      allow update: if isSignedIn() &&
+                       docId == 'account_registry' &&
+                       incoming().keys().hasAll(['registeredUids', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['registeredUids', 'updatedAt']) &&
+                       existing().registeredUids is list &&
+                       existing().registeredUids.size() < 2 &&
+                       !(request.auth.uid in existing().registeredUids) &&
+                       incoming().registeredUids is list &&
+                       incoming().registeredUids.size() == existing().registeredUids.size() + 1 &&
+                       incoming().registeredUids.hasAll(existing().registeredUids) &&
+                       request.auth.uid in incoming().registeredUids &&
+                       isValidTimestamp(incoming().updatedAt);
+      allow delete: if false;
+    }
+
     match /usernames/{username} {
       allow get: if isSignedIn() && isValidUsername(username);
       allow list: if false;
@@ -353,6 +384,7 @@ service cloud.firestore {
       allow create: if isSignedIn() &&
                        isValidId(userId) &&
                        request.auth.uid == userId &&
+                       isRegisteredAccount(userId) &&
                        incoming().keys().hasAll(['userId', 'username', 'displayName', 'bio', 'statusText', 'presence', 'primaryColorHex', 'secondaryColorHex', 'gradientEnabled', 'createdAt', 'updatedAt']) &&
                        incoming().keys().hasOnly(['userId', 'username', 'displayName', 'bio', 'statusText', 'presence', 'avatarUrl', 'bannerUrl', 'bannerVideoUrl', 'primaryColorHex', 'secondaryColorHex', 'gradientEnabled', 'fcmToken', 'createdAt', 'updatedAt']) &&
                        isValidUserProfile(incoming(), userId);

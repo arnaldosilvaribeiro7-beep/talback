@@ -76,6 +76,14 @@ test("User profile, username claim, and private PII isolation", async () => {
   const bob = testEnv.authenticatedContext(BOB_UID).firestore();
   const now = pastDate(5000);
 
+  // Alice claims slot #1 in account_registry before creating her profile
+  await assertSucceeds(
+    alice.collection("app_meta").doc("account_registry").set({
+      registeredUids: [ALICE_UID],
+      updatedAt: now,
+    })
+  );
+
   // Alice creates her username claim & public profile (matching Kotlin payload, no "id")
   await assertSucceeds(
     alice.collection("usernames").doc("alice.dev").set({
@@ -912,4 +920,98 @@ test("Temporary logs, signals, calls, and email_verifications obey TTL and acces
   );
   assert.equal(logsSnap.docs.length, 1);
   assert.equal(logsSnap.docs[0].id, "live_log");
+});
+
+test("Account registry strictly enforces maximum 2 registered accounts", async () => {
+  const unauth = testEnv.unauthenticatedContext().firestore();
+  const alice = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bob = testEnv.authenticatedContext(BOB_UID).firestore();
+  const charlie = testEnv.authenticatedContext(CHARLIE_UID).firestore();
+  const now = pastDate(5000);
+
+  // Unauthenticated cannot read or write registry
+  await assertFails(unauth.collection("app_meta").doc("account_registry").get());
+  await assertFails(
+    unauth.collection("app_meta").doc("account_registry").set({
+      registeredUids: [ALICE_UID],
+      updatedAt: now,
+    })
+  );
+
+  // Arbitrary docId in app_meta or >1 initial UID on create is denied
+  await assertFails(
+    alice.collection("app_meta").doc("other_doc").set({
+      registeredUids: [ALICE_UID],
+      updatedAt: now,
+    })
+  );
+  await assertFails(
+    alice.collection("app_meta").doc("account_registry").set({
+      registeredUids: [ALICE_UID, BOB_UID],
+      updatedAt: now,
+    })
+  );
+
+  // Account #1 (Alice) claims first slot and creates profile
+  await assertSucceeds(
+    alice.collection("app_meta").doc("account_registry").set({
+      registeredUids: [ALICE_UID],
+      updatedAt: now,
+    })
+  );
+
+  // Account #2 (Bob) claims second slot and creates profile
+  await assertSucceeds(
+    bob.collection("app_meta").doc("account_registry").update({
+      registeredUids: [ALICE_UID, BOB_UID],
+      updatedAt: pastDate(2000),
+    })
+  );
+  await assertSucceeds(
+    bob.collection("users").doc(BOB_UID).set({
+      userId: BOB_UID,
+      username: "bob.dev",
+      displayName: "Bob",
+      bio: "",
+      statusText: "",
+      presence: "online",
+      primaryColorHex: 0xff5865f2,
+      secondaryColorHex: 0xff4752c4,
+      gradientEnabled: false,
+      createdAt: pastDate(1500),
+      updatedAt: pastDate(1500),
+    })
+  );
+
+  // Account #3 (Charlie) is denied adding a 3rd UID or replacing an existing UID, and cannot create a profile
+  await assertFails(
+    charlie.collection("app_meta").doc("account_registry").update({
+      registeredUids: [ALICE_UID, BOB_UID, CHARLIE_UID],
+      updatedAt: pastDate(1000),
+    })
+  );
+  await assertFails(
+    charlie.collection("app_meta").doc("account_registry").update({
+      registeredUids: [ALICE_UID, CHARLIE_UID],
+      updatedAt: pastDate(1000),
+    })
+  );
+  await assertFails(
+    charlie.collection("users").doc(CHARLIE_UID).set({
+      userId: CHARLIE_UID,
+      username: "charlie.dev",
+      displayName: "Charlie",
+      bio: "",
+      statusText: "",
+      presence: "online",
+      primaryColorHex: 0xff5865f2,
+      secondaryColorHex: 0xff4752c4,
+      gradientEnabled: false,
+      createdAt: pastDate(1000),
+      updatedAt: pastDate(1000),
+    })
+  );
+
+  // Deleting account_registry is denied
+  await assertFails(alice.collection("app_meta").doc("account_registry").delete());
 });

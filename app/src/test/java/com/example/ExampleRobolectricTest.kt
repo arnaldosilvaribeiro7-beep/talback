@@ -13,7 +13,6 @@ import com.example.data.model.ThemeMode
 import com.example.data.model.UserProfile
 import com.example.data.preferences.AppPreferencesRepository
 import com.example.data.preferences.LocalFriendsCache
-import com.example.data.remote.OAuthUiState
 import com.example.ui.components.MessageListAndComposer
 import com.example.ui.components.ProfileHeaderCard
 import com.example.ui.screens.AuthScreen
@@ -42,8 +41,6 @@ class ExampleRobolectricTest {
         assertEquals("Talkback", context.getString(R.string.app_name))
         val dbId = context.getString(R.string.firestore_database_id)
         assertTrue(dbId.isNotBlank())
-        val webClientId = context.getString(R.string.default_web_client_id)
-        assertTrue(webClientId.endsWith(".apps.googleusercontent.com"))
     }
 
     @Test
@@ -164,18 +161,23 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `auth screen displays google sign-in button and oauth provider config targets google`() {
-        assertEquals("google.com", com.example.data.remote.GoogleOAuthProviderConfig.PROVIDER_ID)
-        assertEquals("select_account", com.example.data.remote.GoogleOAuthProviderConfig.PROMPT_SELECT_ACCOUNT)
+    fun `auth screen renders login and create account tabs with email and password inputs`() {
         composeTestRule.setContent {
             TalkbackTheme(themeMode = ThemeMode.DARK) {
                 AuthScreen(
-                    oauthUiState = OAuthUiState.Idle,
-                    onGoogleSignInClick = {}
+                    isLoading = false,
+                    errorMessage = null,
+                    onClearError = {},
+                    onLoginSubmit = { _, _ -> },
+                    onSignUpSubmit = { _, _ -> }
                 )
             }
         }
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("google_sign_in_button").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("auth_tab_login").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("auth_tab_signup").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("auth_email_input").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("auth_password_input").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("auth_submit_button").performScrollTo().assertIsDisplayed()
     }
 }

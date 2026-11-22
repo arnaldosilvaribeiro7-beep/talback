@@ -6,12 +6,11 @@ import com.example.data.model.PresenceStatus
 import com.example.data.model.ServerMember
 import com.example.data.model.ServerPermission
 import com.example.data.model.UploadedMedia
-import com.example.data.remote.GoogleOAuthProviderConfig
+import com.example.data.remote.AccountLimitReachedException
+import com.example.data.remote.EmailAuthValidator
 import com.example.data.remote.LinkPreviewFetcher
-import com.example.data.remote.OAuthUiState
 import com.example.data.remote.ServerClock
 import com.google.firebase.Timestamp
-import kotlinx.coroutines.CancellationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -167,34 +166,42 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `oauth exception mapper distinguishes cancellation network and configuration errors`() {
-        assertEquals(OAuthUiState.Idle, GoogleOAuthProviderConfig.mapAuthException(CancellationException("cancelled")))
+    fun `email auth validator validates email format password rules and error mappings`() {
+        assertTrue(EmailAuthValidator.isValidEmailFormat("example@gmail.com"))
+        assertTrue(EmailAuthValidator.isValidEmailFormat("  amigo.dev+1@gmail.com "))
+        assertFalse(EmailAuthValidator.isValidEmailFormat(""))
+        assertFalse(EmailAuthValidator.isValidEmailFormat("sem-arroba"))
+        assertFalse(EmailAuthValidator.isValidEmailFormat("usuario@"))
+        assertFalse(EmailAuthValidator.isValidEmailFormat("@gmail.com"))
+        assertFalse(EmailAuthValidator.isValidEmailFormat("usuario@gmail"))
+        assertFalse(EmailAuthValidator.isValidEmailFormat("com espaco@gmail.com"))
 
-        val canceledWeb = GoogleOAuthProviderConfig.mapErrorCodeAndMessage(
-            errorCode = "ERROR_WEB_CONTEXT_CANCELED",
-            rawMessage = "Canceled by user",
-            isWebException = true
-        )
-        assertEquals(OAuthUiState.Idle, canceledWeb)
+        assertNull(EmailAuthValidator.validateSignUp("example@gmail.com", "123456"))
+        assertTrue(EmailAuthValidator.validateSignUp("example@gmail.com", "12345")!!.contains("6"))
+        assertTrue(EmailAuthValidator.validateSignUp("invalido", "123456")!!.contains("example@gmail.com"))
 
-        val networkErr = GoogleOAuthProviderConfig.mapErrorCodeAndMessage(
-            errorCode = "ERROR_NETWORK_REQUEST_FAILED",
-            rawMessage = "No connection",
-            isNetworkException = true
-        )
-        assertTrue(networkErr is OAuthUiState.Error)
-        assertTrue((networkErr as OAuthUiState.Error).message.contains("conexão", ignoreCase = true))
+        assertNull(EmailAuthValidator.validateLogin("example@gmail.com", "minhasenha"))
+        assertTrue(EmailAuthValidator.validateLogin("example@gmail.com", "")!!.contains("senha", ignoreCase = true))
 
-        val shaErr = GoogleOAuthProviderConfig.mapAuthException(
-            IllegalStateException("There was an error while trying to get your package certificate hash")
+        assertEquals(
+            EmailAuthValidator.ACCOUNT_LIMIT_ERROR_MESSAGE,
+            EmailAuthValidator.mapAuthException(AccountLimitReachedException())
         )
-        assertTrue(shaErr is OAuthUiState.Error)
-        assertTrue((shaErr as OAuthUiState.Error).message.contains("SHA-1", ignoreCase = true))
-
-        val redirectMismatch = GoogleOAuthProviderConfig.mapAuthException(
-            IllegalStateException("Error 400: redirect_uri_mismatch")
+        assertTrue(
+            EmailAuthValidator.mapFirebaseAuthErrorCode("ERROR_INVALID_CREDENTIAL", null)
+                .contains("incorretos", ignoreCase = true)
         )
-        assertTrue(redirectMismatch is OAuthUiState.Error)
-        assertTrue((redirectMismatch as OAuthUiState.Error).message.contains("redirecionamento", ignoreCase = true))
+        assertTrue(
+            EmailAuthValidator.mapFirebaseAuthErrorCode("ERROR_EMAIL_ALREADY_IN_USE", null)
+                .contains("Fazer login", ignoreCase = true)
+        )
+        assertTrue(
+            EmailAuthValidator.mapFirebaseAuthErrorCode("ERROR_OPERATION_NOT_ALLOWED", null)
+                .contains("Firebase", ignoreCase = true)
+        )
+        assertTrue(
+            EmailAuthValidator.mapFirebaseAuthErrorCode("ERROR_NETWORK_REQUEST_FAILED", null)
+                .contains("conexão", ignoreCase = true)
+        )
     }
 }
