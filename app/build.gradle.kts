@@ -20,29 +20,6 @@ android {
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
-    val googleServicesFile = file("google-services.json")
-    if (googleServicesFile.exists()) {
-      @Suppress("UNCHECKED_CAST")
-      val root = groovy.json.JsonSlurper().parse(googleServicesFile) as Map<String, Any?>
-      @Suppress("UNCHECKED_CAST")
-      val clients = root["client"] as? List<Map<String, Any?>> ?: emptyList()
-      val matchedClient = clients.firstOrNull { entry ->
-        val info = entry["client_info"] as? Map<*, *>
-        val androidInfo = info?.get("android_client_info") as? Map<*, *>
-        androidInfo?.get("package_name") == applicationId
-      } ?: clients.firstOrNull()
-      @Suppress("UNCHECKED_CAST")
-      val oauthClients = matchedClient?.get("oauth_client") as? List<Map<String, Any?>> ?: emptyList()
-      val androidOAuthClientId = oauthClients
-        .firstOrNull { (it["client_type"] as? Number)?.toInt() == 1 }
-        ?.get("client_id") as? String ?: ""
-      if (androidOAuthClientId.isNotBlank()) {
-        val prefix = androidOAuthClientId.substringBefore(".apps.googleusercontent.com")
-        resValue("string", "google_android_oauth_client_id", androidOAuthClientId)
-        resValue("string", "google_oauth_redirect_scheme", "com.googleusercontent.apps.$prefix")
-      }
-    }
   }
 
   // Do not remove or modify these signingConfigs. They are necessary for building, installing,
@@ -85,7 +62,6 @@ android {
   buildFeatures {
     compose = true
     buildConfig = true
-    resValues = true
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
   dependenciesInfo {
