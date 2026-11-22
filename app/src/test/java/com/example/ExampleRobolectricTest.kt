@@ -13,9 +13,7 @@ import com.example.data.model.ThemeMode
 import com.example.data.model.UserProfile
 import com.example.data.preferences.AppPreferencesRepository
 import com.example.data.preferences.LocalFriendsCache
-import com.example.data.remote.OAuthSessionStore
 import com.example.data.remote.OAuthUiState
-import com.example.data.remote.PendingOAuthSession
 import com.example.ui.components.MessageListAndComposer
 import com.example.ui.components.ProfileHeaderCard
 import com.example.ui.screens.AuthScreen
@@ -46,10 +44,6 @@ class ExampleRobolectricTest {
         assertTrue(dbId.isNotBlank())
         val webClientId = context.getString(R.string.default_web_client_id)
         assertTrue(webClientId.endsWith(".apps.googleusercontent.com"))
-        val androidClientId = context.getString(R.string.google_android_oauth_client_id)
-        assertTrue(androidClientId.endsWith(".apps.googleusercontent.com"))
-        val redirectScheme = context.getString(R.string.google_oauth_redirect_scheme)
-        assertTrue(redirectScheme.startsWith("com.googleusercontent.apps."))
     }
 
     @Test
@@ -170,24 +164,9 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `auth screen displays google sign-in button and oauth session store consumes once`() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        val store = OAuthSessionStore(context)
-        store.save(
-            PendingOAuthSession(
-                state = "st_abc",
-                nonce = "nc_xyz",
-                codeVerifier = "verifier_123",
-                clientId = "client_id",
-                redirectUri = "com.googleusercontent.apps.client:/oauth2redirect",
-                redirectScheme = "com.googleusercontent.apps.client",
-                usedCustomTabsFallback = false,
-                createdAtMillis = System.currentTimeMillis()
-            )
-        )
-        assertEquals("st_abc", store.consume()?.state)
-        assertEquals(null, store.consume())
-
+    fun `auth screen displays google sign-in button and oauth provider config targets google`() {
+        assertEquals("google.com", com.example.data.remote.GoogleOAuthProviderConfig.PROVIDER_ID)
+        assertEquals("select_account", com.example.data.remote.GoogleOAuthProviderConfig.PROMPT_SELECT_ACCOUNT)
         composeTestRule.setContent {
             TalkbackTheme(themeMode = ThemeMode.DARK) {
                 AuthScreen(

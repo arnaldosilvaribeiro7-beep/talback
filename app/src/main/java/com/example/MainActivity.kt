@@ -1,6 +1,5 @@
 package com.example
 
-import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
 import android.util.Log
@@ -52,10 +51,6 @@ import com.google.firebase.storage.FirebaseStorage
 import kotlinx.coroutines.tasks.await
 
 class MainActivity : ComponentActivity() {
-    companion object {
-        const val ACTION_OAUTH_REDIRECT = "com.example.ACTION_OAUTH_REDIRECT"
-    }
-
     private var oauthCoordinator: GoogleOAuthCoordinator? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -104,13 +99,14 @@ class MainActivity : ComponentActivity() {
         val localFriendsCache = LocalFriendsCache(applicationContext)
 
         val authRepo = AuthRepository(db = db, auth = auth)
-        val coordinator = GoogleOAuthCoordinator(applicationContext, authRepo).also {
-            it.registerAuthTabLauncher(this)
+        val coordinator = GoogleOAuthCoordinator(
+            context = applicationContext,
+            auth = auth,
+            authRepository = authRepo
+        ).also {
+            it.checkPendingAuthResult()
         }
         oauthCoordinator = coordinator
-        if (intent?.action == ACTION_OAUTH_REDIRECT) {
-            coordinator.handleRedirectUri(intent?.data)
-        }
 
         val profileRepo = ProfileRepository(db = db, storage = storage, auth = auth)
         val socialRepo = SocialRepository(
@@ -194,17 +190,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-        if (intent.action == ACTION_OAUTH_REDIRECT) {
-            oauthCoordinator?.handleRedirectUri(intent.data)
-        }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        oauthCoordinator?.onHostActivityResumed()
+    override fun onStart() {
+        super.onStart()
+        oauthCoordinator?.checkPendingAuthResult()
     }
 
     private fun ensureFirebaseInitialized(): Boolean {

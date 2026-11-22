@@ -6,11 +6,12 @@ import com.example.data.model.PresenceStatus
 import com.example.data.model.ServerMember
 import com.example.data.model.ServerPermission
 import com.example.data.model.UploadedMedia
-import com.example.data.remote.GoogleOAuthProtocol
+import com.example.data.remote.GoogleOAuthProviderConfig
 import com.example.data.remote.LinkPreviewFetcher
-import com.example.data.remote.OAuthRedirectParseResult
+import com.example.data.remote.OAuthUiState
 import com.example.data.remote.ServerClock
 import com.google.firebase.Timestamp
+import kotlinx.coroutines.CancellationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -166,101 +167,34 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun `oauth pkce verifier challenge and authorization url adhere to RFC 7636 and OIDC`() {
-        val verifier = GoogleOAuthProtocol.generateCodeVerifier()
-        assertTrue(verifier.length in 43..128)
-        assertTrue(verifier.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '-' || it == '_' })
+    fun `oauth exception mapper distinguishes cancellation network and configuration errors`() {
+        assertEquals(OAuthUiState.Idle, GoogleOAuthProviderConfig.mapAuthException(CancellationException("cancelled")))
 
-        val challenge = GoogleOAuthProtocol.computeCodeChallengeS256(verifier)
-        assertFalse(challenge.contains('='))
-        assertEquals(challenge, GoogleOAuthProtocol.computeCodeChallengeS256(verifier))
-
-        val scheme = GoogleOAuthProtocol.deriveRedirectScheme("123456-abc.apps.googleusercontent.com")
-        assertEquals("com.googleusercontent.apps.123456-abc", scheme)
-        val redirectUri = GoogleOAuthProtocol.deriveRedirectUri("123456-abc.apps.googleusercontent.com")
-        assertEquals("com.googleusercontent.apps.123456-abc:/oauth2redirect", redirectUri)
-
-        val authUrl = GoogleOAuthProtocol.buildAuthorizationUrl(
-            clientId = "123456-abc.apps.googleusercontent.com",
-            redirectUri = redirectUri,
-            state = "state_xyz",
-            nonce = "nonce_123",
-            codeChallenge = challenge
+        val canceledWeb = GoogleOAuthProviderConfig.mapErrorCodeAndMessage(
+            errorCode = "ERROR_WEB_CONTEXT_CANCELED",
+            rawMessage = "Canceled by user",
+            isWebException = true
         )
-        assertTrue(authUrl.startsWith("https://accounts.google.com/o/oauth2/v2/auth?"))
-        assertTrue(authUrl.contains("response_type=code"))
-        assertTrue(authUrl.contains("code_challenge_method=S256"))
-        assertTrue(authUrl.contains("state=state_xyz"))
-        assertTrue(authUrl.contains("nonce=nonce_123"))
-        assertTrue(authUrl.contains("prompt=select_account"))
-    }
+        assertEquals(OAuthUiState.Idle, canceledWeb)
 
-    @Test
-    fun `oauth redirect parser validates scheme path state and cancellation`() {
-        val scheme = "com.googleusercontent.apps.123456-abc"
-        val valid = GoogleOAuthProtocol.parseAndValidateRedirect(
-            uriString = "$scheme:/oauth2redirect?code=auth_code_99&state=st_123",
-            expectedScheme = scheme,
-            expectedState = "st_123"
+        val networkErr = GoogleOAuthProviderConfig.mapErrorCodeAndMessage(
+            errorCode = "ERROR_NETWORK_REQUEST_FAILED",
+            rawMessage = "No connection",
+            isNetworkException = true
         )
-        assertEquals(OAuthRedirectParseResult.Success("auth_code_99"), valid)
+        assertTrue(networkErr is OAuthUiState.Error)
+        assertTrue((networkErr as OAuthUiState.Error).message.contains("conexão", ignoreCase = true))
 
-        val csrfMismatch = GoogleOAuthProtocol.parseAndValidateRedirect(
-            uriString = "$scheme:/oauth2redirect?code=auth_code_99&state=wrong_state",
-            expectedScheme = scheme,
-            expectedState = "st_123"
+        val shaErr = GoogleOAuthProviderConfig.mapAuthException(
+            IllegalStateException("There was an error while trying to get your package certificate hash")
         )
-        assertTrue(csrfMismatch is OAuthRedirectParseResult.Error)
+        assertTrue(shaErr is OAuthUiState.Error)
+        assertTrue((shaErr as OAuthUiState.Error).message.contains("SHA-1", ignoreCase = true))
 
-        val cancelled = GoogleOAuthProtocol.parseAndValidateRedirect(
-            uriString = "$scheme:/oauth2redirect?error=access_denied&state=st_123",
-            expectedScheme = scheme,
-            expectedState = "st_123"
+        val redirectMismatch = GoogleOAuthProviderConfig.mapAuthException(
+            IllegalStateException("Error 400: redirect_uri_mismatch")
         )
-        assertTrue(cancelled is OAuthRedirectParseResult.Cancelled)
-
-        val badScheme = GoogleOAuthProtocol.parseAndValidateRedirect(
-            uriString = "evil.scheme:/oauth2redirect?code=auth_code_99&state=st_123",
-            expectedScheme = scheme,
-            expectedState = "st_123"
-        )
-        assertTrue(badScheme is OAuthRedirectParseResult.Error)
-    }
-
-    @Test
-    fun `google oidc id token payload validator verifies issuer audience nonce and expiry`() {
-        val header = GoogleOAuthProtocol.base64UrlEncodeNoPadding("""{"alg":"RS256"}""".toByteArray())
-        val now = 1_800_000_000L
-        val validPayloadJson = """
-            {"iss":"https://accounts.google.com","aud":"client_1","nonce":"n_ok","sub":"sub_42","email":"user@gmail.com","email_verified":true,"name":"Ana","exp":${now + 3600}}
-        """.trimIndent()
-        val validJwt = "$header.${GoogleOAuthProtocol.base64UrlEncodeNoPadding(validPayloadJson.toByteArray())}.sig"
-
-        val parsed = GoogleOAuthProtocol.validateGoogleIdTokenPayload(
-            idToken = validJwt,
-            expectedClientId = "client_1",
-            expectedNonce = "n_ok",
-            nowEpochSeconds = now
-        )
-        assertTrue(parsed.isSuccess)
-        assertEquals("sub_42", parsed.getOrNull()?.subject)
-        assertEquals("user@gmail.com", parsed.getOrNull()?.email)
-        assertTrue(parsed.getOrNull()?.emailVerified == true)
-
-        val badNonce = GoogleOAuthProtocol.validateGoogleIdTokenPayload(
-            idToken = validJwt,
-            expectedClientId = "client_1",
-            expectedNonce = "wrong_nonce",
-            nowEpochSeconds = now
-        )
-        assertTrue(badNonce.isFailure)
-
-        val expired = GoogleOAuthProtocol.validateGoogleIdTokenPayload(
-            idToken = validJwt,
-            expectedClientId = "client_1",
-            expectedNonce = "n_ok",
-            nowEpochSeconds = now + 7200
-        )
-        assertTrue(expired.isFailure)
+        assertTrue(redirectMismatch is OAuthUiState.Error)
+        assertTrue((redirectMismatch as OAuthUiState.Error).message.contains("redirecionamento", ignoreCase = true))
     }
 }

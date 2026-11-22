@@ -1,5 +1,3 @@
 <resources>
     <string name="app_name">Talkback</string>
-    <string name="google_android_oauth_client_id" translatable="false">779151827350-r4qin1f9j6bbd1cuotbqfvbctvjo2292.apps.googleusercontent.com</string>
-    <string name="google_oauth_redirect_scheme" translatable="false">com.googleusercontent.apps.779151827350-r4qin1f9j6bbd1cuotbqfvbctvjo2292</string>
 </resources>
